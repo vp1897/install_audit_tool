@@ -88,28 +88,11 @@
 <body>
     <div id="root" class="w-full min-h-screen bg-white"></div>
 
-    <script>
-        // Wait for all scripts to load, then initialize
-        function waitForDeps(cb) {
-            if (typeof firebase !== 'undefined' && typeof React !== 'undefined' && typeof pdfjsLib !== 'undefined' && typeof Babel !== 'undefined') {
-                cb();
-            } else {
-                setTimeout(function() { waitForDeps(cb); }, 100);
-            }
-        }
-        waitForDeps(function() {
-            // Compile and run the Babel/JSX code
-            var appScript = document.getElementById('app-script');
-            var compiled = Babel.transform(appScript.textContent, { presets: ['react'] }).code;
-            new Function(compiled)();
-        });
-    </script>
-
-    <script type="text/plain" id="app-script">
+    <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
         // Constants
-        const N8N_WEBHOOK_URL = 'REPLACE_WITH_WEBHOOK_URL';
+        const N8N_WEBHOOK_URL = 'https://vergesense.app.n8n.cloud/webhook/06f54acf-6ee5-4ed8-9367-05e6f5a73635';
         const PURPLE = '#6B4EFF';
 
         // Firebase Config
