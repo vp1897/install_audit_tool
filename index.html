@@ -1,0 +1,1857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VergeSense Install Audit Tool</title>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.tailwindcss.com/"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+        }
+        .custom-purple { color: #6B4EFF; }
+        .custom-purple-bg { background-color: #6B4EFF; }
+        .custom-purple-border { border-color: #6B4EFF; }
+        .device-pin {
+            position: absolute;
+            width: 32px;
+            height: 32px;
+            background-color: #6B4EFF;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 2px 8px rgba(107, 78, 255, 0.3);
+        }
+        .device-pin:hover {
+            width: 40px;
+            height: 40px;
+            box-shadow: 0 4px 12px rgba(107, 78, 255, 0.5);
+            font-size: 14px;
+        }
+        .device-pin.completed {
+            border: 3px solid #22c55e;
+        }
+        .device-pin.completed::after {
+            content: '✓';
+            position: absolute;
+            bottom: -8px;
+            font-size: 16px;
+            color: #22c55e;
+        }
+        .map-container {
+            position: relative;
+            width: 100%;
+            max-height: 600px;
+            overflow: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background-color: #f9fafb;
+        }
+        .map-image {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-badge.online { background-color: #dcfce7; color: #166534; }
+        .status-badge.offline { background-color: #fee2e2; color: #991b1b; }
+        .status-badge.submitted { background-color: #dbeafe; color: #1e40af; }
+        .status-badge.in_progress { background-color: #fef3c7; color: #92400e; }
+        .status-badge.not_started { background-color: #f3f4f6; color: #374151; }
+        .status-badge.reviewed { background-color: #e9d5ff; color: #6b21a8; }
+        input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root" class="w-full min-h-screen bg-white"></div>
+
+    <script>
+        // Wait for all scripts to load, then initialize
+        function waitForDeps(cb) {
+            if (typeof firebase !== 'undefined' && typeof React !== 'undefined' && typeof pdfjsLib !== 'undefined' && typeof Babel !== 'undefined') {
+                cb();
+            } else {
+                setTimeout(function() { waitForDeps(cb); }, 100);
+            }
+        }
+        waitForDeps(function() {
+            // Compile and run the Babel/JSX code
+            var appScript = document.getElementById('app-script');
+            var compiled = Babel.transform(appScript.textContent, { presets: ['react'] }).code;
+            new Function(compiled)();
+        });
+    </script>
+
+    <script type="text/plain" id="app-script">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Constants
+        const N8N_WEBHOOK_URL = 'REPLACE_WITH_WEBHOOK_URL';
+        const PURPLE = '#6B4EFF';
+
+        // Firebase Config
+        const firebaseConfig = {
+            apiKey: "AIzaSyC07qgOeFvavF9vZIbG9v-GwgMovjFZTMU",
+            authDomain: "vergesense-site-survey.firebaseapp.com",
+            projectId: "vergesense-site-survey",
+            storageBucket: "vergesense-site-survey.firebasestorage.app",
+            messagingSenderId: "961293834728",
+            appId: "1:961293834728:web:ee41e99216d83c8441ac5d"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+        const storage = firebase.storage();
+
+        // Set PDF.js worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // ============================================
+        // HELPER FUNCTIONS
+        // ============================================
+
+        const isVSEmployee = (email) => email && email.endsWith('@vergesense.com');
+
+        const getTechName = () => localStorage.getItem('techName') || '';
+
+        const saveTechName = (name) => localStorage.setItem('techName', name);
+
+        const extractMapImage = async (pdfData) => {
+            const pdf = await pdfjsLib.getDocument(pdfData).promise;
+            const page = await pdf.getPage(1);
+            const scale = 3;
+            const viewport = page.getViewport({ scale });
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+
+            await page.render({
+                canvasContext: context,
+                viewport: viewport
+            }).promise;
+
+            // Try to detect where the table starts by finding the "Name" header text
+            const textContent = await page.getTextContent();
+            let tableStartY = canvas.height * 0.65; // fallback
+            for (const item of textContent.items) {
+                if (item.str.trim() === 'Name') {
+                    // The table header row - convert PDF Y to canvas Y (PDF origin is bottom-left)
+                    const rawViewport = page.getViewport({ scale: 1 });
+                    const pdfY = item.transform[5];
+                    const canvasY = (rawViewport.height - pdfY) * scale;
+                    tableStartY = Math.max(canvasY - 30 * scale, canvas.height * 0.3); // small margin above "Name"
+                    break;
+                }
+            }
+
+            const mapHeight = Math.floor(tableStartY);
+            const mapCanvas = document.createElement('canvas');
+            mapCanvas.width = canvas.width;
+            mapCanvas.height = mapHeight;
+            const mapCtx = mapCanvas.getContext('2d');
+            mapCtx.drawImage(canvas, 0, 0, canvas.width, mapHeight, 0, 0, mapCanvas.width, mapCanvas.height);
+
+            return mapCanvas.toDataURL('image/png');
+        };
+
+        const parsePdfDevices = async (pdfData) => {
+            const pdf = await pdfjsLib.getDocument(pdfData).promise;
+            const devices = [];
+            const deviceNumbers = new Set();
+
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                const page = await pdf.getPage(pageNum);
+                const textContent = await page.getTextContent();
+                const viewport = page.getViewport({ scale: 1 });
+
+                // Find where the table starts on this page
+                let tableStartY = null;
+                for (const item of textContent.items) {
+                    if (item.str.trim() === 'Name' || item.str.trim() === 'Status') {
+                        tableStartY = item.transform[5];
+                        break;
+                    }
+                }
+
+                // Only parse items that are in the table area (below the header on page 1, or all items on subsequent pages)
+                const tableItems = textContent.items.filter(item => {
+                    if (pageNum > 1) return true; // subsequent pages are all table
+                    if (!tableStartY) return false;
+                    return item.transform[5] <= tableStartY + 5; // at or below table header
+                });
+
+                // Sort items by Y position (descending = top to bottom in reading order) then X
+                tableItems.sort((a, b) => {
+                    const yDiff = b.transform[5] - a.transform[5];
+                    if (Math.abs(yDiff) < 5) return a.transform[4] - b.transform[4]; // same row, sort by X
+                    return yDiff;
+                });
+
+                // Group items into rows by Y position
+                const rows = [];
+                let currentRow = [];
+                let lastY = null;
+                for (const item of tableItems) {
+                    const text = item.str.trim();
+                    if (!text) continue;
+                    const y = item.transform[5];
+                    if (lastY === null || Math.abs(y - lastY) < 8) {
+                        currentRow.push(text);
+                    } else {
+                        if (currentRow.length > 0) rows.push(currentRow);
+                        currentRow = [text];
+                    }
+                    lastY = y;
+                }
+                if (currentRow.length > 0) rows.push(currentRow);
+
+                // Parse rows into device records
+                for (const row of rows) {
+                    // Skip header rows
+                    if (row.includes('Name') || row.includes('Status') || row.includes('Firmware Version')) continue;
+
+                    // Look for a row that starts with a number
+                    const firstItem = row[0];
+                    if (/^\d{1,3}$/.test(firstItem)) {
+                        const num = parseInt(firstItem);
+                        if (num > 0 && num <= 999 && !deviceNumbers.has(num)) {
+                            deviceNumbers.add(num);
+                            const device = {
+                                number: num,
+                                name: '',
+                                status: '',
+                                state: '',
+                                firmware: '',
+                                battery: ''
+                            };
+                            // Parse remaining items in the row
+                            for (let i = 1; i < row.length; i++) {
+                                const text = row[i];
+                                if (!device.name && (text.includes('-') || text.includes(':') || /^[A-Z0-9]{3}/.test(text))) {
+                                    device.name = text;
+                                } else if (!device.status && (text === 'Online' || text === 'Offline')) {
+                                    device.status = text;
+                                } else if (!device.state && (text === 'Operational' || text === 'Error' || text === 'Warning' || text === 'Inactive')) {
+                                    device.state = text;
+                                } else if (!device.firmware && /^\d+\.\d+\.\d+/.test(text)) {
+                                    device.firmware = text;
+                                } else if (!device.battery && (text === 'Wired' || text === 'Healthy' || text === 'Low')) {
+                                    device.battery = text;
+                                }
+                            }
+                            devices.push(device);
+                        }
+                    }
+                }
+            }
+
+            return devices.sort((a, b) => a.number - b.number);
+        };
+
+        const extractDevicePositions = async (pdfData, devices) => {
+            const pdf = await pdfjsLib.getDocument(pdfData).promise;
+            const page = await pdf.getPage(1);
+            const textContent = await page.getTextContent();
+            const viewport = page.getViewport({ scale: 1 });
+
+            // Determine where the table starts (same logic as extractMapImage)
+            let tableStartPdfY = viewport.height * 0.35; // fallback (PDF coords, from bottom)
+            for (const item of textContent.items) {
+                if (item.str.trim() === 'Name') {
+                    tableStartPdfY = item.transform[5] + 10; // slightly above the Name header
+                    break;
+                }
+            }
+            const mapHeightPdf = viewport.height - tableStartPdfY; // height of map area in PDF units (from top)
+            // Actually: the map occupies from top of page to tableStartPdfY
+            // In PDF coords (origin bottom-left): map goes from tableStartPdfY to viewport.height
+            // In canvas coords (origin top-left): map goes from 0 to (viewport.height - tableStartPdfY)
+            const mapCanvasHeight = viewport.height - tableStartPdfY;
+
+            const positions = {};
+            const numberItems = [];
+            const deviceNums = new Set(devices.map(d => d.number));
+
+            // Collect all small number text items from the map area (above the table)
+            textContent.items.forEach(item => {
+                const text = item.str.trim();
+                if (/^\d{1,3}$/.test(text)) {
+                    const num = parseInt(text);
+                    if (deviceNums.has(num) && item.transform[5] > tableStartPdfY) {
+                        // This number is in the map area (PDF Y > tableStartPdfY means above the table)
+                        numberItems.push({
+                            number: num,
+                            x: item.transform[4],
+                            y: item.transform[5]
+                        });
+                    }
+                }
+            });
+
+            // Convert PDF coordinates to percentage positions relative to the cropped map
+            numberItems.forEach(item => {
+                const pinX = (item.x / viewport.width) * 100;
+                // Convert PDF Y to canvas Y within the cropped map
+                const canvasY = viewport.height - item.y; // distance from top of full page
+                const pinY = (canvasY / mapCanvasHeight) * 100;
+                positions[item.number] = {
+                    pinX: Math.max(1, Math.min(99, pinX)),
+                    pinY: Math.max(1, Math.min(99, pinY))
+                };
+            });
+
+            return positions;
+        };
+
+        const autoDetectDeviceType = (device, devices, floorDevices) => {
+            const name = device.name.toUpperCase();
+            const firmware = device.firmware.toUpperCase();
+            const battery = device.battery.toUpperCase();
+
+            // Rule 1: MAC address pattern → EN1
+            if (/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(device.name)) {
+                return 'EN1';
+            }
+
+            // Rule 2: Gateway detection (Wired + firmware 1.x OR name starts with H00)
+            if ((battery === 'WIRED' && firmware.startsWith('1.')) || name.startsWith('H00-')) {
+                return 'GW';
+            }
+
+            // Rule 3 & 4: Check if gateways exist on floor
+            const hasGateway = floorDevices && floorDevices.some(d => d.deviceType === 'GW' || d.name.toUpperCase().startsWith('H00-'));
+            if (hasGateway) {
+                return 'L410';
+            }
+
+            return 'E106';
+        };
+
+        // ============================================
+        // AUTHENTICATION SCREEN
+        // ============================================
+
+        function AuthScreen({ onAuthComplete }) {
+            const [isSigningIn, setIsSigningIn] = useState(false);
+            const [showTechName, setShowTechName] = useState(false);
+            const [techName, setTechName] = useState('');
+
+            const handleGoogleSignIn = async () => {
+                setIsSigningIn(true);
+                const provider = new firebase.auth.GoogleAuthProvider();
+                provider.setCustomParameters({ hd: 'vergesense.com' });
+                try {
+                    await auth.signInWithPopup(provider);
+                    onAuthComplete();
+                } catch (err) {
+                    console.error('Google sign-in failed:', err);
+                    alert('Google sign-in failed. Please try again.');
+                    setIsSigningIn(false);
+                }
+            };
+
+            const handleTechContinue = async () => {
+                if (!techName.trim()) {
+                    alert('Please enter your name');
+                    return;
+                }
+                setIsSigningIn(true);
+                try {
+                    await auth.signInAnonymously();
+                    saveTechName(techName.trim());
+                    onAuthComplete();
+                } catch (err) {
+                    console.error('Anonymous sign-in failed:', err);
+                    alert('Sign-in failed. Please try again.');
+                    setIsSigningIn(false);
+                }
+            };
+
+            return (
+                <div className="w-full min-h-screen bg-white flex items-center justify-center p-4">
+                    <div className="w-full max-w-md">
+                        <div className="text-center mb-12">
+                            <h1 className="text-4xl font-bold custom-purple mb-2">VergeSense</h1>
+                            <p className="text-xl text-gray-600">Install Audit Tool</p>
+                        </div>
+
+                        <div className="space-y-4">
+                            {!showTechName ? (
+                                <>
+                                    <button
+                                        onClick={handleGoogleSignIn}
+                                        disabled={isSigningIn}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold py-3 px-4 rounded-lg transition"
+                                    >
+                                        {isSigningIn ? 'Signing in...' : 'Sign in with Google (VS)'}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowTechName(true)}
+                                        disabled={isSigningIn}
+                                        className="w-full custom-purple-bg hover:opacity-90 disabled:opacity-50 text-white font-semibold py-3 px-4 rounded-lg transition"
+                                    >
+                                        Continue as Tech
+                                    </button>
+                                </>
+                            ) : (
+                                <>
+                                    <input
+                                        type="text"
+                                        placeholder="Enter your name"
+                                        value={techName}
+                                        onChange={(e) => setTechName(e.target.value)}
+                                        onKeyPress={(e) => e.key === 'Enter' && handleTechContinue()}
+                                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                        autoFocus
+                                    />
+                                    <button
+                                        onClick={handleTechContinue}
+                                        disabled={isSigningIn || !techName.trim()}
+                                        className="w-full custom-purple-bg hover:opacity-90 disabled:opacity-50 text-white font-semibold py-3 px-4 rounded-lg transition"
+                                    >
+                                        {isSigningIn ? 'Signing in...' : 'Continue'}
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowTechName(false);
+                                            setTechName('');
+                                        }}
+                                        className="w-full text-gray-600 hover:text-gray-800 font-semibold py-3 px-4"
+                                    >
+                                        Back
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // PROJECT LIST SCREEN
+        // ============================================
+
+        function ProjectListScreen({ user, onSelectProject, onNewProject }) {
+            const [projects, setProjects] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [searchQuery, setSearchQuery] = useState('');
+            const [showMineOnly, setShowMineOnly] = useState(isVSEmployee(user.email));
+
+            useEffect(() => {
+                const unsubscribe = db.collection('installAudits').onSnapshot((snapshot) => {
+                    let allProjects = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        ...doc.data()
+                    }));
+
+                    if (showMineOnly && isVSEmployee(user.email)) {
+                        allProjects = allProjects.filter(p => p.createdBy === user.email);
+                    }
+
+                    setProjects(allProjects);
+                    setLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, [user.email, showMineOnly]);
+
+            const filtered = projects.filter(p =>
+                p.projectName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                p.siteName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                p.address?.toLowerCase().includes(searchQuery.toLowerCase())
+            );
+
+            const getDeviceCount = (project) => project.totalDevices || 0;
+            const getFloorCount = (project) => project.numFloors || 0;
+
+            const getStatusColor = (status) => {
+                const colors = {
+                    'not_started': 'bg-gray-100 text-gray-800',
+                    'in_progress': 'bg-yellow-100 text-yellow-800',
+                    'submitted': 'bg-blue-100 text-blue-800',
+                    'reviewed': 'bg-purple-100 text-purple-800'
+                };
+                return colors[status] || colors['not_started'];
+            };
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    {/* Header */}
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-7xl mx-auto px-4 py-6">
+                            <h1 className="text-3xl font-bold">VS Install Audit</h1>
+                            <p className="text-purple-100 mt-1">Manage installation audits and device deployment</p>
+                        </div>
+                    </div>
+
+                    {/* Content */}
+                    <div className="max-w-7xl mx-auto px-4 py-8">
+                        {/* Toolbar */}
+                        <div className="mb-8 space-y-4">
+                            <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+                                <div className="flex-1 w-full">
+                                    <input
+                                        type="text"
+                                        placeholder="Search by project, site, or address..."
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+                                {isVSEmployee(user.email) && (
+                                    <button
+                                        onClick={onNewProject}
+                                        className="custom-purple-bg text-white px-6 py-2 rounded-lg font-semibold hover:opacity-90 whitespace-nowrap"
+                                    >
+                                        + New Project
+                                    </button>
+                                )}
+                            </div>
+
+                            {isVSEmployee(user.email) && (
+                                <div className="flex items-center gap-4">
+                                    <button
+                                        onClick={() => setShowMineOnly(false)}
+                                        className={`px-4 py-2 rounded-lg font-semibold transition ${!showMineOnly ? 'custom-purple-bg text-white' : 'bg-white text-gray-600 border border-gray-300'}`}
+                                    >All</button>
+                                    <button
+                                        onClick={() => setShowMineOnly(true)}
+                                        className={`px-4 py-2 rounded-lg font-semibold transition ${showMineOnly ? 'custom-purple-bg text-white' : 'bg-white text-gray-600 border border-gray-300'}`}
+                                    >Mine</button>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Projects Grid */}
+                        {loading ? (
+                            <div className="text-center py-12">
+                                <p className="text-gray-500">Loading projects...</p>
+                            </div>
+                        ) : filtered.length === 0 ? (
+                            <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
+                                <p className="text-gray-500 text-lg">No projects found</p>
+                                {isVSEmployee(user.email) && (
+                                    <button
+                                        onClick={onNewProject}
+                                        className="mt-4 custom-purple-bg text-white px-6 py-2 rounded-lg font-semibold hover:opacity-90"
+                                    >
+                                        Create your first project
+                                    </button>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {filtered.map(project => (
+                                    <div
+                                        key={project.id}
+                                        onClick={() => onSelectProject(project)}
+                                        className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-lg cursor-pointer transition"
+                                    >
+                                        <div className="mb-4">
+                                            <h3 className="text-lg font-bold text-gray-900">{project.projectName}</h3>
+                                            <p className="text-gray-600 text-sm">{project.siteName}</p>
+                                        </div>
+
+                                        <div className="mb-4">
+                                            <span className={`status-badge ${project.status}`}>
+                                                {project.status.replace('_', ' ').toUpperCase()}
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-2 text-sm text-gray-600 mb-4">
+                                            <p><strong>Address:</strong> {project.address}</p>
+                                            <p><strong>Floors:</strong> {getFloorCount(project)}</p>
+                                            <p><strong>Devices:</strong> {getDeviceCount(project)}</p>
+                                            <p><strong>Contact:</strong> {project.vsContactName}</p>
+                                        </div>
+
+                                        <div className="pt-4 border-t border-gray-200">
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onSelectProject(project);
+                                                }}
+                                                className="w-full custom-purple-bg text-white py-2 px-4 rounded font-semibold hover:opacity-90"
+                                            >
+                                                View Details
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // NEW PROJECT SCREEN
+        // ============================================
+
+        function NewProjectScreen({ user, onProjectCreated, onCancel }) {
+            const [formData, setFormData] = useState({
+                projectName: '',
+                siteName: '',
+                address: '',
+                numFloors: 1,
+                vsContactName: '',
+                vsContactEmail: ''
+            });
+            const [saving, setSaving] = useState(false);
+
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({
+                    ...prev,
+                    [name]: name === 'numFloors' ? parseInt(value) || 1 : value
+                }));
+            };
+
+            const handleSave = async () => {
+                if (!formData.projectName || !formData.siteName || !formData.address || !formData.vsContactName || !formData.vsContactEmail) {
+                    alert('Please fill in all fields');
+                    return;
+                }
+
+                setSaving(true);
+                try {
+                    const now = new Date();
+                    const projectRef = await db.collection('installAudits').add({
+                        projectName: formData.projectName,
+                        siteName: formData.siteName,
+                        address: formData.address,
+                        numFloors: formData.numFloors,
+                        vsContact: formData.vsContactEmail,
+                        vsContactName: formData.vsContactName,
+                        status: 'not_started',
+                        locked: false,
+                        createdAt: now,
+                        createdBy: user.email
+                    });
+
+                    // Create floor documents
+                    for (let i = 1; i <= formData.numFloors; i++) {
+                        await projectRef.collection('floors').add({
+                            floorName: `Floor ${i}`,
+                            pdfUrl: '',
+                            pdfMapImage: '',
+                            devices: [],
+                            createdAt: now
+                        });
+                    }
+
+                    onProjectCreated();
+                } catch (err) {
+                    console.error('Error creating project:', err);
+                    alert('Failed to create project. Please try again.');
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-2xl mx-auto px-4 py-6">
+                            <h1 className="text-3xl font-bold">Create New Project</h1>
+                        </div>
+                    </div>
+
+                    <div className="max-w-2xl mx-auto px-4 py-8">
+                        <div className="bg-white rounded-lg border border-gray-200 p-8">
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Project Name *</label>
+                                    <input
+                                        type="text"
+                                        name="projectName"
+                                        value={formData.projectName}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Site Name *</label>
+                                    <input
+                                        type="text"
+                                        name="siteName"
+                                        value={formData.siteName}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Address *</label>
+                                    <input
+                                        type="text"
+                                        name="address"
+                                        value={formData.address}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Number of Floors *</label>
+                                    <input
+                                        type="number"
+                                        name="numFloors"
+                                        min="1"
+                                        value={formData.numFloors}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">VS Contact Name *</label>
+                                    <input
+                                        type="text"
+                                        name="vsContactName"
+                                        value={formData.vsContactName}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">VS Contact Email *</label>
+                                    <input
+                                        type="email"
+                                        name="vsContactEmail"
+                                        value={formData.vsContactEmail}
+                                        onChange={handleChange}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div className="flex gap-4 pt-6">
+                                    <button
+                                        onClick={handleSave}
+                                        disabled={saving}
+                                        className="flex-1 custom-purple-bg text-white py-3 px-4 rounded-lg font-semibold hover:opacity-90 disabled:opacity-50"
+                                    >
+                                        {saving ? 'Creating...' : 'Create Project'}
+                                    </button>
+                                    <button
+                                        onClick={onCancel}
+                                        className="flex-1 bg-gray-300 text-gray-800 py-3 px-4 rounded-lg font-semibold hover:bg-gray-400"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // PROJECT DETAIL SCREEN
+        // ============================================
+
+        function ProjectDetailScreen({ project, user, onSelectFloor, onBack, onUnlock, onSummary }) {
+            const [floors, setFloors] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                const unsubscribe = db.collection('installAudits')
+                    .doc(project.id)
+                    .collection('floors')
+                    .orderBy('floorName')
+                    .onSnapshot((snapshot) => {
+                        setFloors(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                        setLoading(false);
+                    });
+
+                return () => unsubscribe();
+            }, [project.id]);
+
+            const isLocked = project.locked && !isVSEmployee(user.email);
+            const canEdit = !isLocked;
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-7xl mx-auto px-4 py-6">
+                            <button
+                                onClick={onBack}
+                                className="text-purple-100 hover:text-white mb-4 font-semibold"
+                            >
+                                ← Back to Projects
+                            </button>
+                            <h1 className="text-3xl font-bold">{project.projectName}</h1>
+                            <p className="text-purple-100 mt-1">{project.siteName} - {project.address}</p>
+                        </div>
+                    </div>
+
+                    <div className="max-w-7xl mx-auto px-4 py-8">
+                        {project.locked && (
+                            <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center justify-between">
+                                <div>
+                                    <p className="text-blue-800 font-semibold">Submitted - Read Only</p>
+                                    <p className="text-blue-700 text-sm">This project has been submitted. Techs cannot make further edits.</p>
+                                </div>
+                                {isVSEmployee(user.email) && onUnlock && (
+                                    <button
+                                        onClick={onUnlock}
+                                        className="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg font-semibold text-sm"
+                                    >
+                                        Unlock for Editing
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        <div className="bg-white rounded-lg border border-gray-200 p-6 mb-8">
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Status</p>
+                                    <span className={`status-badge ${project.status} block mt-2 w-fit`}>
+                                        {project.status.replace('_', ' ').toUpperCase()}
+                                    </span>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">Floors</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">{floors.length}</p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">Total Devices</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">
+                                        {floors.reduce((acc, f) => acc + (f.devices?.length || 0), 0)}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">Contact</p>
+                                    <p className="font-semibold text-gray-900 mt-1">{project.vsContactName}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h2 className="text-2xl font-bold text-gray-900 mb-6">Floors</h2>
+                            {loading ? (
+                                <p className="text-gray-500">Loading floors...</p>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {floors.map(floor => {
+                                        const deviceCount = floor.devices?.length || 0;
+                                        const completedCount = floor.devices?.filter(d => d.complete)?.length || 0;
+                                        const completionPercent = deviceCount > 0 ? Math.round((completedCount / deviceCount) * 100) : 0;
+
+                                        return (
+                                            <div
+                                                key={floor.id}
+                                                onClick={() => canEdit && onSelectFloor(floor)}
+                                                className={`rounded-lg border border-gray-200 p-6 ${canEdit ? 'hover:shadow-lg cursor-pointer' : ''} transition bg-white`}
+                                            >
+                                                <h3 className="text-lg font-bold text-gray-900 mb-4">{floor.floorName}</h3>
+
+                                                <div className="space-y-3 mb-4">
+                                                    <div>
+                                                        <p className="text-sm text-gray-600">Devices</p>
+                                                        <p className="text-2xl font-bold text-gray-900">{deviceCount}</p>
+                                                    </div>
+
+                                                    {deviceCount > 0 && (
+                                                        <div>
+                                                            <p className="text-sm text-gray-600 mb-2">Completion</p>
+                                                            <div className="w-full bg-gray-200 rounded-full h-2">
+                                                                <div
+                                                                    className="custom-purple-bg h-2 rounded-full transition-all"
+                                                                    style={{ width: `${completionPercent}%` }}
+                                                                />
+                                                            </div>
+                                                            <p className="text-sm text-gray-600 mt-1">
+                                                                {completedCount} of {deviceCount} complete
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {canEdit && (
+                                                    <button
+                                                        onClick={() => onSelectFloor(floor)}
+                                                        className="w-full custom-purple-bg text-white py-2 px-4 rounded font-semibold hover:opacity-90 mt-4"
+                                                    >
+                                                        {deviceCount === 0 ? 'Upload PDF' : 'View Floor'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Summary and Submit */}
+                        <div className="mt-12">
+                            <button
+                                onClick={onSummary}
+                                className="custom-purple-bg text-white py-3 px-8 rounded-lg font-semibold hover:opacity-90"
+                            >
+                                {project.status === 'submitted' ? 'View Summary' : 'Review & Submit'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // FLOOR SCREEN
+        // ============================================
+
+        function FloorScreen({ project, floor, user, onBack, onSelectDevice }) {
+            const [floorData, setFloorData] = useState(floor);
+            const [loading, setLoading] = useState(false);
+            const [uploading, setUploading] = useState(false);
+            const fileInputRef = useRef(null);
+
+            const isLocked = project.locked && !isVSEmployee(user.email);
+            const canEdit = !isLocked;
+
+            const handlePdfUpload = async (file) => {
+                if (!file.type.includes('pdf')) {
+                    alert('Please upload a PDF file');
+                    return;
+                }
+
+                setUploading(true);
+                try {
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        const pdfData = e.target.result;
+
+                        // Extract map image
+                        const mapImage = await extractMapImage(pdfData);
+
+                        // Parse devices
+                        const parsedDevices = await parsePdfDevices(pdfData);
+
+                        // Extract device positions
+                        const positions = await extractDevicePositions(pdfData, parsedDevices);
+
+                        // Get existing floor devices for auto-detection
+                        const existingDevices = floorData.devices || [];
+
+                        // Two-pass auto-detection: first detect GWs and EN1s, then classify area sensors
+                        const firstPass = parsedDevices.map(device => {
+                            const name = device.name.toUpperCase();
+                            const firmware = device.firmware || '';
+                            const battery = (device.battery || '').toUpperCase();
+                            if (/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(device.name)) return { ...device, detectedType: 'EN1' };
+                            if ((battery === 'WIRED' && firmware.startsWith('1.')) || name.startsWith('H00-')) return { ...device, detectedType: 'GW' };
+                            return { ...device, detectedType: '' };
+                        });
+                        const hasGateway = firstPass.some(d => d.detectedType === 'GW');
+
+                        const deviceObjects = firstPass.map(device => {
+                            const existing = existingDevices.find(d => d.number === device.number);
+                            const pos = positions[device.number] || { pinX: 0, pinY: 0 };
+                            let deviceType = device.detectedType;
+                            if (!deviceType) deviceType = hasGateway ? 'L410' : 'E106';
+
+                            return {
+                                number: device.number,
+                                name: device.name,
+                                status: device.status,
+                                state: device.state,
+                                deviceType: existing?.deviceType || deviceType || '',
+                                pinX: existing?.pinX || pos.pinX,
+                                pinY: existing?.pinY || pos.pinY,
+                                photo: existing?.photo || '',
+                                notes: existing?.notes || '',
+                                complete: existing?.complete || false
+                            };
+                        });
+
+                        // Upload PDF to Firebase Storage
+                        const storagePath = `installAudits/${project.id}/floors/${floor.id}/${file.name}`;
+                        const fileRef = storage.ref(storagePath);
+                        await fileRef.put(file);
+                        const pdfUrl = await fileRef.getDownloadURL();
+
+                        // Save to Firestore
+                        await db.collection('installAudits')
+                            .doc(project.id)
+                            .collection('floors')
+                            .doc(floor.id)
+                            .update({
+                                pdfUrl: pdfUrl,
+                                pdfMapImage: mapImage,
+                                devices: deviceObjects,
+                                updatedAt: new Date()
+                            });
+
+                        // Update project total device count and status
+                        const allFloorsSnap = await db.collection('installAudits').doc(project.id).collection('floors').get();
+                        let total = 0;
+                        allFloorsSnap.forEach(f => { total += (f.data().devices?.length || 0); });
+                        await db.collection('installAudits').doc(project.id).update({
+                            totalDevices: total,
+                            status: project.status === 'not_started' ? 'in_progress' : project.status
+                        });
+
+                        setFloorData({
+                            ...floorData,
+                            pdfMapImage: mapImage,
+                            devices: deviceObjects,
+                            pdfUrl: pdfUrl
+                        });
+
+                        alert('PDF uploaded and processed successfully!');
+                    };
+                    reader.readAsArrayBuffer(file);
+                } catch (err) {
+                    console.error('Error uploading PDF:', err);
+                    alert('Failed to upload PDF. Please try again.');
+                } finally {
+                    setUploading(false);
+                }
+            };
+
+            const deviceCount = floorData.devices?.length || 0;
+            const completedCount = floorData.devices?.filter(d => d.complete)?.length || 0;
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-7xl mx-auto px-4 py-6">
+                            <button
+                                onClick={onBack}
+                                className="text-purple-100 hover:text-white mb-4 font-semibold"
+                            >
+                                ← Back to Project
+                            </button>
+                            <h1 className="text-3xl font-bold">{floorData.floorName}</h1>
+                            <p className="text-purple-100 mt-1">{project.projectName}</p>
+                        </div>
+                    </div>
+
+                    <div className="max-w-7xl mx-auto px-4 py-8">
+                        {isLocked && (
+                            <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                <p className="text-blue-800 font-semibold">Submitted - Read Only</p>
+                            </div>
+                        )}
+
+                        {!floorData.pdfMapImage ? (
+                            <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+                                <p className="text-gray-600 text-lg mb-6">No PDF uploaded yet</p>
+                                {canEdit && (
+                                    <>
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            accept=".pdf"
+                                            onChange={(e) => e.target.files[0] && handlePdfUpload(e.target.files[0])}
+                                        />
+                                        <button
+                                            onClick={() => fileInputRef.current?.click()}
+                                            disabled={uploading}
+                                            className="custom-purple-bg text-white px-8 py-3 rounded-lg font-semibold hover:opacity-90 disabled:opacity-50"
+                                        >
+                                            {uploading ? 'Uploading...' : 'Upload Device Management PDF'}
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        ) : (
+                            <>
+                                {/* Progress */}
+                                <div className="bg-white rounded-lg border border-gray-200 p-6 mb-8">
+                                    <p className="text-gray-600 text-sm mb-2">Completion Status</p>
+                                    <div className="w-full bg-gray-200 rounded-full h-3">
+                                        <div
+                                            className="custom-purple-bg h-3 rounded-full transition-all"
+                                            style={{ width: `${deviceCount > 0 ? Math.round((completedCount / deviceCount) * 100) : 0}%` }}
+                                        />
+                                    </div>
+                                    <p className="text-lg font-bold text-gray-900 mt-3">
+                                        {completedCount} of {deviceCount} devices complete
+                                    </p>
+                                </div>
+
+                                {/* Map and Devices */}
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                    {/* Map */}
+                                    <div className="lg:col-span-2">
+                                        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                                            <div className="map-container">
+                                                <div style={{ position: 'relative', width: '100%', paddingBottom: '0' }}>
+                                                    <img
+                                                        src={floorData.pdfMapImage}
+                                                        alt="Floor plan"
+                                                        className="map-image"
+                                                        style={{ display: 'block' }}
+                                                    />
+                                                    {floorData.devices?.map(device => (
+                                                        <div
+                                                            key={device.number}
+                                                            className={`device-pin ${device.complete ? 'completed' : ''}`}
+                                                            style={{
+                                                                left: `${device.pinX}%`,
+                                                                top: `${device.pinY}%`
+                                                            }}
+                                                            onClick={() => canEdit && onSelectDevice(device)}
+                                                            title={`Device ${device.number}: ${device.name}`}
+                                                        >
+                                                            {device.number}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Device List */}
+                                    <div className="lg:col-span-1">
+                                        <div className="bg-white rounded-lg border border-gray-200 p-6 max-h-96 overflow-y-auto">
+                                            <h3 className="text-lg font-bold text-gray-900 mb-4">Devices</h3>
+                                            <div className="space-y-2">
+                                                {floorData.devices?.map(device => (
+                                                    <div
+                                                        key={device.number}
+                                                        onClick={() => canEdit && onSelectDevice(device)}
+                                                        className={`p-3 rounded-lg border cursor-pointer transition ${
+                                                            device.complete
+                                                                ? 'bg-green-50 border-green-200'
+                                                                : 'bg-gray-50 border-gray-200 hover:border-purple-300'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-start justify-between">
+                                                            <div className="flex-1">
+                                                                <p className="font-semibold text-gray-900">
+                                                                    Device #{device.number}
+                                                                </p>
+                                                                <p className="text-xs text-gray-600">{device.name}</p>
+                                                                <p className="text-xs text-gray-500 mt-1">
+                                                                    Type: {device.deviceType || '?'}
+                                                                </p>
+                                                            </div>
+                                                            {device.complete && (
+                                                                <span className="text-green-600 font-bold">✓</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {canEdit && (
+                                    <div className="mt-8">
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            accept=".pdf"
+                                            onChange={(e) => e.target.files[0] && handlePdfUpload(e.target.files[0])}
+                                            style={{ display: 'none' }}
+                                        />
+                                        <button
+                                            onClick={() => fileInputRef.current?.click()}
+                                            disabled={uploading}
+                                            className="text-gray-600 hover:text-gray-800 font-semibold py-2 px-4"
+                                        >
+                                            {uploading ? 'Uploading...' : 'Re-upload PDF'}
+                                        </button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // DEVICE SCREEN
+        // ============================================
+
+        function DeviceScreen({ project, floor, device, user, onBack, onSave }) {
+            const [deviceData, setDeviceData] = useState(device);
+            const [saving, setSaving] = useState(false);
+            const [errors, setErrors] = useState({});
+            const photoInputRef = useRef(null);
+
+            const isLocked = project.locked && !isVSEmployee(user.email);
+
+            const handleChange = (field, value) => {
+                setDeviceData(prev => ({ ...prev, [field]: value }));
+            };
+
+            const [photoFile, setPhotoFile] = useState(null);
+            const [photoPreview, setPhotoPreview] = useState(device.photo || '');
+            const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+            const handlePhotoUpload = async (file) => {
+                if (!file.type.includes('image')) {
+                    alert('Please upload an image file');
+                    return;
+                }
+                setPhotoFile(file);
+                // Show local preview immediately
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    setPhotoPreview(e.target.result);
+                    setDeviceData(prev => ({ ...prev, photo: 'pending_upload' }));
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const validateAndSave = async () => {
+                const newErrors = {};
+
+                if (!deviceData.deviceType) {
+                    newErrors.deviceType = 'Device type is required';
+                }
+
+                if (!deviceData.photo && !photoFile) {
+                    newErrors.photo = 'Photo is required';
+                }
+
+                if (Object.keys(newErrors).length > 0) {
+                    setErrors(newErrors);
+                    return;
+                }
+
+                setSaving(true);
+                try {
+                    // Upload photo to Firebase Storage if new file selected
+                    let photoUrl = deviceData.photo;
+                    if (photoFile) {
+                        setUploadingPhoto(true);
+                        const storagePath = `installAudits/${project.id}/floors/${floor.id}/device_${deviceData.number}_${Date.now()}.${photoFile.name.split('.').pop()}`;
+                        const fileRef = storage.ref(storagePath);
+                        await fileRef.put(photoFile);
+                        photoUrl = await fileRef.getDownloadURL();
+                        setUploadingPhoto(false);
+                    }
+
+                    // Save device to Firestore
+                    const floorsRef = db.collection('installAudits').doc(project.id).collection('floors');
+                    const floorDoc = await floorsRef.doc(floor.id).get();
+                    const floorData = floorDoc.data();
+
+                    const updatedDevices = floorData.devices.map(d =>
+                        d.number === deviceData.number
+                            ? { ...deviceData, photo: photoUrl, complete: true }
+                            : d
+                    );
+
+                    await floorsRef.doc(floor.id).update({
+                        devices: updatedDevices
+                    });
+
+                    onSave({ ...deviceData, photo: photoUrl, complete: true });
+                } catch (err) {
+                    console.error('Error saving device:', err);
+                    alert('Failed to save device. Please try again.');
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-2xl mx-auto px-4 py-6">
+                            <button
+                                onClick={onBack}
+                                className="text-purple-100 hover:text-white mb-4 font-semibold"
+                            >
+                                ← Back to Floor
+                            </button>
+                            <h1 className="text-3xl font-bold">Device #{deviceData.number}</h1>
+                            <p className="text-purple-100 mt-1">{deviceData.name}</p>
+                        </div>
+                    </div>
+
+                    <div className="max-w-2xl mx-auto px-4 py-8">
+                        {isLocked && (
+                            <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                <p className="text-blue-800 font-semibold">Read Only</p>
+                            </div>
+                        )}
+
+                        <div className="bg-white rounded-lg border border-gray-200 p-8">
+                            <div className="space-y-6">
+                                {/* Auto-populated fields */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                    <div>
+                                        <label className="block text-sm font-semibold text-gray-700 mb-2">Status</label>
+                                        <p className="px-4 py-2 bg-gray-100 rounded-lg text-gray-900">
+                                            {deviceData.status}
+                                        </p>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-semibold text-gray-700 mb-2">State</label>
+                                        <p className="px-4 py-2 bg-gray-100 rounded-lg text-gray-900">
+                                            {deviceData.state}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Device Type - Required */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                        Device Type * {errors.deviceType && <span className="text-red-600">{errors.deviceType}</span>}
+                                    </label>
+                                    <select
+                                        value={deviceData.deviceType}
+                                        onChange={(e) => {
+                                            handleChange('deviceType', e.target.value);
+                                            setErrors(prev => ({ ...prev, deviceType: '' }));
+                                        }}
+                                        disabled={isLocked}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100"
+                                    >
+                                        <option value="">Select device type</option>
+                                        <option value="GW">Gateway (GW)</option>
+                                        <option value="L410">L410</option>
+                                        <option value="E106">E106</option>
+                                        <option value="EN1">EN1</option>
+                                    </select>
+                                </div>
+
+                                {/* Photo - Required */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                        Photo * {errors.photo && <span className="text-red-600">{errors.photo}</span>}
+                                    </label>
+                                    {(photoPreview || deviceData.photo) && (
+                                        <div className="mb-4">
+                                            <img
+                                                src={photoPreview || deviceData.photo}
+                                                alt="Device"
+                                                className="max-h-64 rounded-lg border border-gray-200"
+                                            />
+                                        </div>
+                                    )}
+                                    {!isLocked && (
+                                        <>
+                                            <input
+                                                ref={photoInputRef}
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={(e) => e.target.files[0] && handlePhotoUpload(e.target.files[0])}
+                                                style={{ display: 'none' }}
+                                            />
+                                            <button
+                                                onClick={() => photoInputRef.current?.click()}
+                                                className="w-full border-2 border-dashed border-gray-300 rounded-lg p-6 hover:border-purple-500 text-gray-600 hover:text-purple-600 transition font-semibold"
+                                            >
+                                                {(photoPreview || deviceData.photo) ? 'Change Photo' : 'Upload Photo'}
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+
+                                {/* Notes - Optional */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Notes (Optional)</label>
+                                    <textarea
+                                        value={deviceData.notes}
+                                        onChange={(e) => handleChange('notes', e.target.value)}
+                                        disabled={isLocked}
+                                        placeholder="Any additional notes about this device..."
+                                        rows={4}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100"
+                                    />
+                                </div>
+
+                                {/* Save Button */}
+                                {!isLocked && (
+                                    <div className="flex gap-4 pt-6">
+                                        <button
+                                            onClick={validateAndSave}
+                                            disabled={saving}
+                                            className="flex-1 custom-purple-bg text-white py-3 px-4 rounded-lg font-semibold hover:opacity-90 disabled:opacity-50"
+                                        >
+                                            {saving ? (uploadingPhoto ? 'Uploading photo...' : 'Saving...') : 'Save & Mark Complete'}
+                                        </button>
+                                        <button
+                                            onClick={onBack}
+                                            className="flex-1 bg-gray-300 text-gray-800 py-3 px-4 rounded-lg font-semibold hover:bg-gray-400"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                )}
+
+                                {isLocked && (
+                                    <div className="pt-6">
+                                        <button
+                                            onClick={onBack}
+                                            className="w-full bg-gray-300 text-gray-800 py-3 px-4 rounded-lg font-semibold hover:bg-gray-400"
+                                        >
+                                            Back
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // SUMMARY SCREEN
+        // ============================================
+
+        function SummaryScreen({ project, user, onBack, onSubmit }) {
+            const [floors, setFloors] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [submitting, setSubmitting] = useState(false);
+            const [techName, setTechName] = useState(getTechName());
+
+            useEffect(() => {
+                const unsubscribe = db.collection('installAudits')
+                    .doc(project.id)
+                    .collection('floors')
+                    .orderBy('floorName')
+                    .onSnapshot((snapshot) => {
+                        setFloors(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                        setLoading(false);
+                    });
+
+                return () => unsubscribe();
+            }, [project.id]);
+
+            const totalDevices = floors.reduce((acc, f) => acc + (f.devices?.length || 0), 0);
+            const completedDevices = floors.reduce((acc, f) => acc + (f.devices?.filter(d => d.complete)?.length || 0), 0);
+
+            const deviceCounts = { GW: 0, L410: 0, E106: 0, EN1: 0 };
+            floors.forEach(floor => {
+                floor.devices?.forEach(device => {
+                    if (device.deviceType && deviceCounts.hasOwnProperty(device.deviceType)) {
+                        deviceCounts[device.deviceType]++;
+                    }
+                });
+            });
+
+            const isLocked = project.locked;
+            const isVS = isVSEmployee(user.email);
+
+            const handleSubmit = async () => {
+                if (!isVS && !techName.trim()) {
+                    alert('Please enter your name');
+                    return;
+                }
+
+                if (completedDevices < totalDevices) {
+                    alert(`Please complete all ${totalDevices - completedDevices} remaining device(s) before submitting.`);
+                    return;
+                }
+
+                setSubmitting(true);
+                try {
+                    const now = new Date();
+                    const finalTechName = isVS ? (project.techName || 'VS Employee') : techName.trim();
+
+                    // Update project status
+                    await db.collection('installAudits').doc(project.id).update({
+                        status: 'submitted',
+                        locked: true,
+                        submittedAt: now,
+                        techName: finalTechName
+                    });
+
+                    // Prepare webhook payload
+                    const payload = {
+                        projectName: project.projectName,
+                        siteName: project.siteName,
+                        address: project.address,
+                        techName: finalTechName,
+                        vsContact: project.vsContact,
+                        vsContactName: project.vsContactName,
+                        submittedAt: now.toISOString(),
+                        totalDevices: totalDevices,
+                        deviceCounts: deviceCounts,
+                        floors: floors.map(floor => ({
+                            floorName: floor.floorName,
+                            deviceCount: floor.devices?.length || 0,
+                            devices: floor.devices?.map(d => ({
+                                number: d.number,
+                                name: d.name,
+                                type: d.deviceType,
+                                status: d.status,
+                                notes: d.notes,
+                                photoUrl: d.photo
+                            })) || []
+                        }))
+                    };
+
+                    // Send webhook if configured
+                    if (N8N_WEBHOOK_URL !== 'REPLACE_WITH_WEBHOOK_URL') {
+                        try {
+                            await fetch(N8N_WEBHOOK_URL, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            });
+                        } catch (err) {
+                            console.error('Webhook send failed:', err);
+                        }
+                    }
+
+                    alert('Project submitted successfully!');
+                    saveTechName(finalTechName);
+                    onSubmit();
+                } catch (err) {
+                    console.error('Error submitting project:', err);
+                    alert('Failed to submit project. Please try again.');
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            if (loading) {
+                return (
+                    <div className="w-full min-h-screen bg-gray-50 flex items-center justify-center">
+                        <p className="text-gray-500">Loading summary...</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="w-full min-h-screen bg-gray-50">
+                    <div className="custom-purple-bg text-white">
+                        <div className="max-w-7xl mx-auto px-4 py-6">
+                            <button
+                                onClick={onBack}
+                                className="text-purple-100 hover:text-white mb-4 font-semibold"
+                            >
+                                ← Back
+                            </button>
+                            <h1 className="text-3xl font-bold">Summary & Submit</h1>
+                            <p className="text-purple-100 mt-1">{project.projectName}</p>
+                        </div>
+                    </div>
+
+                    <div className="max-w-7xl mx-auto px-4 py-8">
+                        {isLocked && !isVS && (
+                            <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                <p className="text-blue-800 font-semibold">Submitted - Read Only</p>
+                            </div>
+                        )}
+
+                        {/* Summary Stats */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+                            <div className="bg-white rounded-lg border border-gray-200 p-6">
+                                <p className="text-gray-600 text-sm">Total Devices</p>
+                                <p className="text-3xl font-bold text-gray-900 mt-2">{totalDevices}</p>
+                            </div>
+                            <div className="bg-white rounded-lg border border-gray-200 p-6">
+                                <p className="text-gray-600 text-sm">Completed</p>
+                                <p className="text-3xl font-bold custom-purple mt-2">{completedDevices}</p>
+                            </div>
+                            <div className="bg-white rounded-lg border border-gray-200 p-6">
+                                <p className="text-gray-600 text-sm">Progress</p>
+                                <p className="text-3xl font-bold text-gray-900 mt-2">
+                                    {totalDevices > 0 ? Math.round((completedDevices / totalDevices) * 100) : 0}%
+                                </p>
+                            </div>
+                            <div className="bg-white rounded-lg border border-gray-200 p-6">
+                                <p className="text-gray-600 text-sm">Status</p>
+                                <span className={`status-badge ${project.status} block mt-2 w-fit`}>
+                                    {project.status.replace('_', ' ').toUpperCase()}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Device Type Breakdown */}
+                        <div className="bg-white rounded-lg border border-gray-200 p-6 mb-8">
+                            <h2 className="text-xl font-bold text-gray-900 mb-4">Device Types</h2>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Gateway (GW)</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">{deviceCounts.GW}</p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">L410</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">{deviceCounts.L410}</p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">E106</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">{deviceCounts.E106}</p>
+                                </div>
+                                <div>
+                                    <p className="text-gray-600 text-sm">EN1</p>
+                                    <p className="text-2xl font-bold text-gray-900 mt-1">{deviceCounts.EN1}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Floor-by-Floor */}
+                        <div className="bg-white rounded-lg border border-gray-200 p-6 mb-8">
+                            <h2 className="text-xl font-bold text-gray-900 mb-4">Floor Breakdown</h2>
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead>
+                                        <tr className="border-b border-gray-200">
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Floor</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Devices</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">GW</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">L410</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">E106</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">EN1</th>
+                                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Complete</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {floors.map(floor => {
+                                            const floorDeviceCount = floor.devices?.length || 0;
+                                            const floorCompleted = floor.devices?.filter(d => d.complete)?.length || 0;
+                                            const floorCounts = { GW: 0, L410: 0, E106: 0, EN1: 0 };
+                                            floor.devices?.forEach(d => {
+                                                if (d.deviceType && floorCounts.hasOwnProperty(d.deviceType)) {
+                                                    floorCounts[d.deviceType]++;
+                                                }
+                                            });
+
+                                            return (
+                                                <tr key={floor.id} className="border-b border-gray-200 hover:bg-gray-50">
+                                                    <td className="py-3 px-4 font-semibold text-gray-900">{floor.floorName}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{floorDeviceCount}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{floorCounts.GW}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{floorCounts.L410}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{floorCounts.E106}</td>
+                                                    <td className="py-3 px-4 text-gray-700">{floorCounts.EN1}</td>
+                                                    <td className="py-3 px-4 font-semibold">
+                                                        <span className={floorCompleted === floorDeviceCount ? 'text-green-600' : 'text-orange-600'}>
+                                                            {floorCompleted} / {floorDeviceCount}
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Tech Name Input */}
+                        {!isLocked && !isVS && (
+                            <div className="bg-white rounded-lg border border-gray-200 p-6 mb-8">
+                                <h2 className="text-xl font-bold text-gray-900 mb-4">Technician Information</h2>
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Your Name *</label>
+                                    <input
+                                        type="text"
+                                        value={techName}
+                                        onChange={(e) => setTechName(e.target.value)}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Submit Button */}
+                        {!isLocked ? (
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={handleSubmit}
+                                    disabled={submitting || completedDevices < totalDevices}
+                                    className="flex-1 custom-purple-bg text-white py-3 px-4 rounded-lg font-semibold hover:opacity-90 disabled:opacity-50"
+                                >
+                                    {submitting ? 'Submitting...' : 'Submit Project'}
+                                </button>
+                                <button
+                                    onClick={onBack}
+                                    className="flex-1 bg-gray-300 text-gray-800 py-3 px-4 rounded-lg font-semibold hover:bg-gray-400"
+                                >
+                                    Back
+                                </button>
+                            </div>
+                        ) : (
+                            <div>
+                                <button
+                                    onClick={onBack}
+                                    className="w-full bg-gray-300 text-gray-800 py-3 px-4 rounded-lg font-semibold hover:bg-gray-400"
+                                >
+                                    Back
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ============================================
+        // MAIN APP COMPONENT
+        // ============================================
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [screen, setScreen] = useState('list');
+            const [currentProject, setCurrentProject] = useState(null);
+            const [currentFloor, setCurrentFloor] = useState(null);
+            const [currentDevice, setCurrentDevice] = useState(null);
+
+            useEffect(() => {
+                const unsubscribe = auth.onAuthStateChanged((authUser) => {
+                    if (authUser) {
+                        const email = authUser.email || 'tech@vergesense.app';
+                        setUser({ uid: authUser.uid, email: email });
+                    } else {
+                        setUser(null);
+                    }
+                    setLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, []);
+
+            if (loading) {
+                return (
+                    <div className="w-full min-h-screen bg-white flex items-center justify-center">
+                        <p className="text-gray-500 text-lg">Loading...</p>
+                    </div>
+                );
+            }
+
+            if (!user) {
+                return <AuthScreen onAuthComplete={() => setScreen('list')} />;
+            }
+
+            if (screen === 'list') {
+                return (
+                    <ProjectListScreen
+                        user={user}
+                        onSelectProject={(project) => {
+                            setCurrentProject(project);
+                            setScreen('project');
+                        }}
+                        onNewProject={() => setScreen('newProject')}
+                    />
+                );
+            }
+
+            if (screen === 'newProject') {
+                return (
+                    <NewProjectScreen
+                        user={user}
+                        onProjectCreated={() => setScreen('list')}
+                        onCancel={() => setScreen('list')}
+                    />
+                );
+            }
+
+            if (screen === 'project' && currentProject) {
+                return (
+                    <ProjectDetailScreen
+                        project={currentProject}
+                        user={user}
+                        onSelectFloor={(floor) => {
+                            setCurrentFloor(floor);
+                            setScreen('floor');
+                        }}
+                        onBack={() => setScreen('list')}
+                        onSummary={() => setScreen('summary')}
+                        onUnlock={async () => {
+                            await db.collection('installAudits').doc(currentProject.id).update({ locked: false, status: 'in_progress' });
+                            setCurrentProject({ ...currentProject, locked: false, status: 'in_progress' });
+                        }}
+                    />
+                );
+            }
+
+            if (screen === 'floor' && currentProject && currentFloor) {
+                return (
+                    <FloorScreen
+                        project={currentProject}
+                        floor={currentFloor}
+                        user={user}
+                        onBack={() => setScreen('project')}
+                        onSelectDevice={(device) => {
+                            setCurrentDevice(device);
+                            setScreen('device');
+                        }}
+                    />
+                );
+            }
+
+            if (screen === 'device' && currentProject && currentFloor && currentDevice) {
+                return (
+                    <DeviceScreen
+                        project={currentProject}
+                        floor={currentFloor}
+                        device={currentDevice}
+                        user={user}
+                        onBack={() => setScreen('floor')}
+                        onSave={(device) => {
+                            setCurrentDevice(device);
+                            setScreen('floor');
+                        }}
+                    />
+                );
+            }
+
+            if (screen === 'summary' && currentProject) {
+                return (
+                    <SummaryScreen
+                        project={currentProject}
+                        user={user}
+                        onBack={() => setScreen('project')}
+                        onSubmit={() => setScreen('list')}
+                    />
+                );
+            }
+
+            return (
+                <ProjectListScreen
+                    user={user}
+                    onSelectProject={(project) => {
+                        setCurrentProject(project);
+                        setScreen('project');
+                    }}
+                    onNewProject={() => setScreen('newProject')}
+                />
+            );
+        }
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
