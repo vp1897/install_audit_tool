@@ -371,18 +371,11 @@
             const [techCode, setTechCode] = useState('');
             const [codeError, setCodeError] = useState('');
 
-            const handleGoogleSignIn = async () => {
+            const handleGoogleSignIn = () => {
                 setIsSigningIn(true);
                 const provider = new firebase.auth.GoogleAuthProvider();
                 provider.setCustomParameters({ hd: 'vergesense.com' });
-                try {
-                    await auth.signInWithPopup(provider);
-                    onAuthComplete();
-                } catch (err) {
-                    console.error('Google sign-in failed:', err);
-                    alert('Google sign-in failed. Please try again.');
-                    setIsSigningIn(false);
-                }
+                auth.signInWithRedirect(provider);
             };
 
             const handleTechContinue = async () => {
@@ -411,6 +404,8 @@
                     const projectDoc = snapshot.docs[0];
                     const project = { id: projectDoc.id, ...projectDoc.data() };
 
+                    // Session persistence so tech is signed out when app/tab closes
+                    await auth.setPersistence(firebase.auth.Auth.Persistence.SESSION);
                     await auth.signInAnonymously();
                     saveTechName(techName.trim());
                     onTechCodeAuth(project, techName.trim());
@@ -1862,24 +1857,17 @@
             };
 
             useEffect(() => {
+                // Check for redirect result first (Google sign-in returns here)
+                auth.getRedirectResult().catch(() => {});
+
                 const unsubscribe = auth.onAuthStateChanged((authUser) => {
                     if (authUser) {
-                        const email = authUser.email || '';
-                        // If it's a VS employee (Google sign-in), let them through
-                        if (isVSEmployee(email)) {
-                            setUser({ uid: authUser.uid, email: email });
-                            setLoading(false);
-                        } else {
-                            // Anonymous/tech user — sign them out so they always start fresh
-                            auth.signOut().then(() => {
-                                setUser(null);
-                                setLoading(false);
-                            });
-                        }
+                        const email = authUser.email || 'tech@vergesense.app';
+                        setUser({ uid: authUser.uid, email: email });
                     } else {
                         setUser(null);
-                        setLoading(false);
                     }
+                    setLoading(false);
                 });
                 return () => unsubscribe();
             }, []);
