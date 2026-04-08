@@ -816,7 +816,7 @@
                                         <option value="">Select a VS contact...</option>
                                         {VS_CONTACTS.map(c => (
                                             <option key={c.email || '__other__'} value={c.email || '__other__'}>
-                                                {c.name}
+                                                {c.email ? `${c.name} (${c.email})` : c.name}
                                             </option>
                                         ))}
                                     </select>
@@ -1073,14 +1073,10 @@
                         reader.readAsArrayBuffer(file);
                     });
 
-                    // Extract map image
-                    const mapImage = await extractMapImage(pdfData);
-
-                    // Parse devices
-                    const parsedDevices = await parsePdfDevices(pdfData);
-
-                    // Extract device positions
-                    const positions = await extractDevicePositions(pdfData, parsedDevices);
+                    // PDF.js transfers buffer ownership, so copy for each call
+                    const mapImage = await extractMapImage(pdfData.slice(0));
+                    const parsedDevices = await parsePdfDevices(pdfData.slice(0));
+                    const positions = await extractDevicePositions(pdfData.slice(0), parsedDevices);
 
                     // Get existing floor devices for auto-detection
                     const existingDevices = floorData.devices || [];
