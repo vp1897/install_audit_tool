@@ -1074,9 +1074,16 @@
                     });
 
                     // PDF.js transfers buffer ownership, so copy for each call
-                    const mapImage = await extractMapImage(pdfData.slice(0));
+                    const mapImageDataUrl = await extractMapImage(pdfData.slice(0));
                     const parsedDevices = await parsePdfDevices(pdfData.slice(0));
                     const positions = await extractDevicePositions(pdfData.slice(0), parsedDevices);
+
+                    // Upload map image to Firebase Storage (too large for Firestore)
+                    const mapBlob = await fetch(mapImageDataUrl).then(r => r.blob());
+                    const mapStoragePath = `installAudits/${project.id}/floors/${floor.id}/map.png`;
+                    const mapRef = storage.ref(mapStoragePath);
+                    await mapRef.put(mapBlob, { contentType: 'image/png' });
+                    const mapImage = await mapRef.getDownloadURL();
 
                     // Get existing floor devices for auto-detection
                     const existingDevices = floorData.devices || [];
@@ -1855,17 +1862,14 @@
             };
 
             useEffect(() => {
-                const unsubscribe = auth.onAuthStateChanged((authUser) => {
-                    if (authUser) {
-                        const email = authUser.email || 'tech@vergesense.app';
-                        setUser({ uid: authUser.uid, email: email });
-                    } else {
-                        setUser(null);
-                    }
+                // Sign out any persisted session so users always start at login
+                auth.signOut().then(() => {
+                    setUser(null);
+                    setLoading(false);
+                }).catch(() => {
+                    setUser(null);
                     setLoading(false);
                 });
-
-                return () => unsubscribe();
             }, []);
 
             if (loading) {
