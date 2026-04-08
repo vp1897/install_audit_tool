@@ -3,6 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#6B4EFF">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiVlMgSW5zdGFsbCBBdWRpdCIsInNob3J0X25hbWUiOiJJbnN0YWxsIEF1ZGl0IiwidGhlbWVfY29sb3IiOiIjNkI0RUZGIiwiYmFja2dyb3VuZF9jb2xvciI6IiM2QjRFRkYiLCJkaXNwbGF5Ijoic3RhbmRhbG9uZSIsInN0YXJ0X3VybCI6Ii8iLCJpY29ucyI6W119">
     <title>VergeSense Install Audit Tool</title>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
@@ -123,6 +127,19 @@
         const getTechName = () => localStorage.getItem('techName') || '';
 
         const saveTechName = (name) => localStorage.setItem('techName', name);
+
+        const VS_CONTACTS = [
+            { name: "Victoria Philbin", email: "victoria@vergesense.com" },
+            { name: "Marcus Byrd", email: "marcus.byrd@vergesense.com" },
+            { name: "Maria Sapriza-Munoz", email: "maria.sapriza@vergesense.com" },
+            { name: "Aaron Jerabek", email: "aaron@vergesense.com" },
+            { name: "Michelle Jackson", email: "michelle.jackson@vergesense.com" },
+            { name: "Charles Cruz", email: "charles.cruz@vergesense.com" },
+            { name: "Hui Hwan Tan", email: "huihwan.tan@vergesense.com" },
+            { name: "Adam Gaxiola", email: "adam.gaxiola@vergesense.com" },
+            { name: "Giancarlo Arechiga", email: "giancarlo@vergesense.com" },
+            { name: "Other (enter below)", email: "" }
+        ];
 
         const generateTechCode = () => {
             const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -663,7 +680,8 @@
                 address: '',
                 numFloors: 1,
                 vsContactName: '',
-                vsContactEmail: ''
+                vsContactEmail: '',
+                customContact: false
             });
             const [saving, setSaving] = useState(false);
 
@@ -776,26 +794,58 @@
                                 </div>
 
                                 <div>
-                                    <label className="block text-sm font-semibold text-gray-700 mb-2">VS Contact Name *</label>
-                                    <input
-                                        type="text"
-                                        name="vsContactName"
-                                        value={formData.vsContactName}
-                                        onChange={handleChange}
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">VS Contact *</label>
+                                    <select
+                                        value={formData.customContact ? '__other__' : formData.vsContactEmail}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            if (val === '__other__') {
+                                                setFormData(prev => ({ ...prev, vsContactName: '', vsContactEmail: '', customContact: true }));
+                                            } else {
+                                                const contact = VS_CONTACTS.find(c => c.email === val);
+                                                setFormData(prev => ({
+                                                    ...prev,
+                                                    vsContactName: contact ? contact.name : '',
+                                                    vsContactEmail: val,
+                                                    customContact: false
+                                                }));
+                                            }
+                                        }}
                                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                                    />
+                                    >
+                                        <option value="">Select a VS contact...</option>
+                                        {VS_CONTACTS.map(c => (
+                                            <option key={c.email || '__other__'} value={c.email || '__other__'}>
+                                                {c.name}
+                                            </option>
+                                        ))}
+                                    </select>
                                 </div>
 
-                                <div>
-                                    <label className="block text-sm font-semibold text-gray-700 mb-2">VS Contact Email *</label>
-                                    <input
-                                        type="email"
-                                        name="vsContactEmail"
-                                        value={formData.vsContactEmail}
-                                        onChange={handleChange}
-                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                                    />
-                                </div>
+                                {formData.customContact && (
+                                    <>
+                                        <div>
+                                            <label className="block text-sm font-semibold text-gray-700 mb-2">Contact Name *</label>
+                                            <input
+                                                type="text"
+                                                name="vsContactName"
+                                                value={formData.vsContactName}
+                                                onChange={handleChange}
+                                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-semibold text-gray-700 mb-2">Contact Email *</label>
+                                            <input
+                                                type="email"
+                                                name="vsContactEmail"
+                                                value={formData.vsContactEmail}
+                                                onChange={handleChange}
+                                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                            />
+                                        </div>
+                                    </>
+                                )}
 
                                 <div className="flex gap-4 pt-6">
                                     <button
@@ -823,7 +873,7 @@
         // PROJECT DETAIL SCREEN
         // ============================================
 
-        function ProjectDetailScreen({ project, user, onSelectFloor, onBack, onUnlock, onSummary, onSignOut }) {
+        function ProjectDetailScreen({ project, user, onSelectFloor, onBack, onUnlock, onSummary, onSignOut, isTechMode }) {
             const [floors, setFloors] = useState([]);
             const [loading, setLoading] = useState(true);
 
@@ -848,12 +898,14 @@
                     <div className="custom-purple-bg text-white">
                         <div className="max-w-7xl mx-auto px-4 py-6">
                             <div className="flex items-center justify-between mb-4">
-                                <button
-                                    onClick={onBack}
-                                    className="text-purple-100 hover:text-white font-semibold"
-                                >
-                                    ← Back to Projects
-                                </button>
+                                {!isTechMode ? (
+                                    <button
+                                        onClick={onBack}
+                                        className="text-purple-100 hover:text-white font-semibold"
+                                    >
+                                        ← Back to Projects
+                                    </button>
+                                ) : <div />}
                                 <button
                                     onClick={onSignOut}
                                     className="text-purple-200 hover:text-white text-sm font-semibold"
@@ -968,7 +1020,7 @@
                                                         onClick={() => onSelectFloor(floor)}
                                                         className="w-full custom-purple-bg text-white py-2 px-4 rounded font-semibold hover:opacity-90 mt-4"
                                                     >
-                                                        {deviceCount === 0 ? 'Upload PDF' : 'View Floor'}
+                                                        {deviceCount === 0 ? 'Upload Floor Overview' : 'View Floor'}
                                                     </button>
                                                 )}
                                             </div>
@@ -1013,93 +1065,95 @@
 
                 setUploading(true);
                 try {
-                    const reader = new FileReader();
-                    reader.onload = async (e) => {
-                        const pdfData = e.target.result;
+                    // Read file as ArrayBuffer
+                    const pdfData = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = (e) => resolve(e.target.result);
+                        reader.onerror = (e) => reject(e);
+                        reader.readAsArrayBuffer(file);
+                    });
 
-                        // Extract map image
-                        const mapImage = await extractMapImage(pdfData);
+                    // Extract map image
+                    const mapImage = await extractMapImage(pdfData);
 
-                        // Parse devices
-                        const parsedDevices = await parsePdfDevices(pdfData);
+                    // Parse devices
+                    const parsedDevices = await parsePdfDevices(pdfData);
 
-                        // Extract device positions
-                        const positions = await extractDevicePositions(pdfData, parsedDevices);
+                    // Extract device positions
+                    const positions = await extractDevicePositions(pdfData, parsedDevices);
 
-                        // Get existing floor devices for auto-detection
-                        const existingDevices = floorData.devices || [];
+                    // Get existing floor devices for auto-detection
+                    const existingDevices = floorData.devices || [];
 
-                        // Two-pass auto-detection: first detect GWs and EN1s, then classify area sensors
-                        const firstPass = parsedDevices.map(device => {
-                            const name = device.name.toUpperCase();
-                            const firmware = device.firmware || '';
-                            const battery = (device.battery || '').toUpperCase();
-                            if (/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(device.name)) return { ...device, detectedType: 'EN1' };
-                            if ((battery === 'WIRED' && firmware.startsWith('1.')) || name.startsWith('H00-')) return { ...device, detectedType: 'GW' };
-                            return { ...device, detectedType: '' };
-                        });
-                        const hasGateway = firstPass.some(d => d.detectedType === 'GW');
+                    // Two-pass auto-detection: first detect GWs and EN1s, then classify area sensors
+                    const firstPass = parsedDevices.map(device => {
+                        const name = device.name.toUpperCase();
+                        const firmware = device.firmware || '';
+                        const battery = (device.battery || '').toUpperCase();
+                        if (/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(device.name)) return { ...device, detectedType: 'EN1' };
+                        if ((battery === 'WIRED' && firmware.startsWith('1.')) || name.startsWith('H00-')) return { ...device, detectedType: 'GW' };
+                        return { ...device, detectedType: '' };
+                    });
+                    const hasGateway = firstPass.some(d => d.detectedType === 'GW');
 
-                        const deviceObjects = firstPass.map(device => {
-                            const existing = existingDevices.find(d => d.number === device.number);
-                            const pos = positions[device.number] || { pinX: 0, pinY: 0 };
-                            let deviceType = device.detectedType;
-                            if (!deviceType) deviceType = hasGateway ? 'L410' : 'E106';
+                    const deviceObjects = firstPass.map(device => {
+                        const existing = existingDevices.find(d => d.number === device.number);
+                        const pos = positions[device.number] || { pinX: 0, pinY: 0 };
+                        let deviceType = device.detectedType;
+                        if (!deviceType) deviceType = hasGateway ? 'L410' : 'E106';
 
-                            return {
-                                number: device.number,
-                                name: device.name,
-                                status: device.status,
-                                state: device.state,
-                                deviceType: existing?.deviceType || deviceType || '',
-                                pinX: existing?.pinX || pos.pinX,
-                                pinY: existing?.pinY || pos.pinY,
-                                photo: existing?.photo || '',
-                                notes: existing?.notes || '',
-                                complete: existing?.complete || false
-                            };
-                        });
+                        return {
+                            number: device.number,
+                            name: device.name,
+                            status: device.status,
+                            state: device.state,
+                            deviceType: existing?.deviceType || deviceType || '',
+                            pinX: existing?.pinX || pos.pinX,
+                            pinY: existing?.pinY || pos.pinY,
+                            photo: existing?.photo || '',
+                            notes: existing?.notes || '',
+                            complete: existing?.complete || false
+                        };
+                    });
 
-                        // Upload PDF to Firebase Storage
-                        const storagePath = `installAudits/${project.id}/floors/${floor.id}/${file.name}`;
-                        const fileRef = storage.ref(storagePath);
-                        await fileRef.put(file);
-                        const pdfUrl = await fileRef.getDownloadURL();
+                    // Upload PDF to Firebase Storage
+                    const storagePath = `installAudits/${project.id}/floors/${floor.id}/${file.name}`;
+                    const fileRef = storage.ref(storagePath);
+                    await fileRef.put(file);
+                    const pdfUrl = await fileRef.getDownloadURL();
 
-                        // Save to Firestore
-                        await db.collection('installAudits')
-                            .doc(project.id)
-                            .collection('floors')
-                            .doc(floor.id)
-                            .update({
-                                pdfUrl: pdfUrl,
-                                pdfMapImage: mapImage,
-                                devices: deviceObjects,
-                                updatedAt: new Date()
-                            });
-
-                        // Update project total device count and status
-                        const allFloorsSnap = await db.collection('installAudits').doc(project.id).collection('floors').get();
-                        let total = 0;
-                        allFloorsSnap.forEach(f => { total += (f.data().devices?.length || 0); });
-                        await db.collection('installAudits').doc(project.id).update({
-                            totalDevices: total,
-                            status: project.status === 'not_started' ? 'in_progress' : project.status
-                        });
-
-                        setFloorData({
-                            ...floorData,
+                    // Save to Firestore
+                    await db.collection('installAudits')
+                        .doc(project.id)
+                        .collection('floors')
+                        .doc(floor.id)
+                        .update({
+                            pdfUrl: pdfUrl,
                             pdfMapImage: mapImage,
                             devices: deviceObjects,
-                            pdfUrl: pdfUrl
+                            updatedAt: new Date()
                         });
 
-                        alert('PDF uploaded and processed successfully!');
-                    };
-                    reader.readAsArrayBuffer(file);
+                    // Update project total device count and status
+                    const allFloorsSnap = await db.collection('installAudits').doc(project.id).collection('floors').get();
+                    let total = 0;
+                    allFloorsSnap.forEach(f => { total += (f.data().devices?.length || 0); });
+                    await db.collection('installAudits').doc(project.id).update({
+                        totalDevices: total,
+                        status: project.status === 'not_started' ? 'in_progress' : project.status
+                    });
+
+                    setFloorData({
+                        ...floorData,
+                        pdfMapImage: mapImage,
+                        devices: deviceObjects,
+                        pdfUrl: pdfUrl
+                    });
+
+                    alert('PDF uploaded and processed successfully!');
                 } catch (err) {
                     console.error('Error uploading PDF:', err);
-                    alert('Failed to upload PDF. Please try again.');
+                    alert('Failed to upload PDF: ' + err.message);
                 } finally {
                     setUploading(false);
                 }
@@ -1132,7 +1186,7 @@
 
                         {!floorData.pdfMapImage ? (
                             <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
-                                <p className="text-gray-600 text-lg mb-6">No PDF uploaded yet</p>
+                                <p className="text-gray-600 text-lg mb-6">No device management overview uploaded yet</p>
                                 {canEdit && (
                                     <>
                                         <input
@@ -1146,7 +1200,7 @@
                                             disabled={uploading}
                                             className="custom-purple-bg text-white px-8 py-3 rounded-lg font-semibold hover:opacity-90 disabled:opacity-50"
                                         >
-                                            {uploading ? 'Uploading...' : 'Upload Device Management PDF'}
+                                            {uploading ? 'Processing...' : 'Upload Device Management Overview'}
                                         </button>
                                     </>
                                 )}
@@ -1249,7 +1303,7 @@
                                             disabled={uploading}
                                             className="text-gray-600 hover:text-gray-800 font-semibold py-2 px-4"
                                         >
-                                            {uploading ? 'Uploading...' : 'Re-upload PDF'}
+                                            {uploading ? 'Processing...' : 'Re-upload Overview'}
                                         </button>
                                     </div>
                                 )}
@@ -1788,6 +1842,7 @@
             const [currentProject, setCurrentProject] = useState(null);
             const [currentFloor, setCurrentFloor] = useState(null);
             const [currentDevice, setCurrentDevice] = useState(null);
+            const [isTechMode, setIsTechMode] = useState(false);
 
             const handleSignOut = async () => {
                 try {
@@ -1797,6 +1852,7 @@
                     setCurrentProject(null);
                     setCurrentFloor(null);
                     setCurrentDevice(null);
+                    setIsTechMode(false);
                 } catch (err) {
                     console.error('Sign out failed:', err);
                 }
@@ -1830,6 +1886,7 @@
                         onAuthComplete={() => setScreen('list')}
                         onTechCodeAuth={(project, name) => {
                             setCurrentProject(project);
+                            setIsTechMode(true);
                             setScreen('project');
                         }}
                     />
@@ -1876,6 +1933,7 @@
                             setCurrentProject({ ...currentProject, locked: false, status: 'in_progress' });
                         }}
                         onSignOut={handleSignOut}
+                        isTechMode={isTechMode}
                     />
                 );
             }
