@@ -1862,14 +1862,26 @@
             };
 
             useEffect(() => {
-                // Sign out any persisted session so users always start at login
-                auth.signOut().then(() => {
-                    setUser(null);
-                    setLoading(false);
-                }).catch(() => {
-                    setUser(null);
-                    setLoading(false);
+                const unsubscribe = auth.onAuthStateChanged((authUser) => {
+                    if (authUser) {
+                        const email = authUser.email || '';
+                        // If it's a VS employee (Google sign-in), let them through
+                        if (isVSEmployee(email)) {
+                            setUser({ uid: authUser.uid, email: email });
+                            setLoading(false);
+                        } else {
+                            // Anonymous/tech user — sign them out so they always start fresh
+                            auth.signOut().then(() => {
+                                setUser(null);
+                                setLoading(false);
+                            });
+                        }
+                    } else {
+                        setUser(null);
+                        setLoading(false);
+                    }
                 });
+                return () => unsubscribe();
             }, []);
 
             if (loading) {
