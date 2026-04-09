@@ -203,16 +203,12 @@
             const bounds = await detectPdfBounds(page);
             const rawVP = bounds.viewport;
 
-            // Crop: skip top ~12% (header) and everything below "Name" table header
-            // In canvas coords (top-origin): top crop and bottom crop
-            const cropTop = Math.floor((rawVP.height - bounds.headerEndPdfY) * scale);
+            // Crop out only the device table at the bottom (below "Name" header)
+            // Keep everything above the table — full header + floor plan
             const cropBottom = Math.floor((rawVP.height - bounds.tableStartPdfY) * scale);
-
-            const mapTop = Math.max(0, cropTop);
             const mapBottom = Math.min(canvas.height, cropBottom);
-            const mapHeight = mapBottom - mapTop;
 
-            if (mapHeight <= 0) {
+            if (mapBottom <= 50) {
                 // Fallback: use top 65% of page
                 const fallbackHeight = Math.floor(canvas.height * 0.65);
                 const mapCanvas = document.createElement('canvas');
@@ -225,9 +221,9 @@
 
             const mapCanvas = document.createElement('canvas');
             mapCanvas.width = canvas.width;
-            mapCanvas.height = mapHeight;
+            mapCanvas.height = mapBottom;
             const mapCtx = mapCanvas.getContext('2d');
-            mapCtx.drawImage(canvas, 0, mapTop, canvas.width, mapHeight, 0, 0, mapCanvas.width, mapCanvas.height);
+            mapCtx.drawImage(canvas, 0, 0, canvas.width, mapBottom, 0, 0, mapCanvas.width, mapCanvas.height);
 
             return mapCanvas.toDataURL('image/png');
         };
@@ -1183,7 +1179,7 @@
         // FLOOR PLAN MAP (with pinch-to-zoom + pan)
         // ============================================
 
-        function FloorPlanMap({ mapImage, devices, onSelectDevice, height }) {
+        function FloorPlanMap({ mapImage, devices, onSelectDevice, height, highlightDevice }) {
             const wrapRef = useRef(null);
             const pinchRef = useRef(null);
             const [zoom, setZoom] = useState(1);
@@ -1236,8 +1232,6 @@
                 };
             }, []);
 
-            // Only show pins if real positions were extracted from the PDF
-            // (not grid fallback — the floor plan image already has numbered icons)
             const devs = devices || [];
             const hasRealPositions = devs.some(d => d.pinX > 0 && d.pinY > 0);
 
@@ -1258,16 +1252,28 @@
                         >−</button>
                     </div>
 
+                    {/* Highlighted device indicator */}
+                    {highlightDevice && (
+                        <div style={{
+                            position: 'absolute', top: 8, left: 8, zIndex: 20,
+                            background: '#6B4EFF', color: 'white', borderRadius: 8,
+                            padding: '4px 12px', fontSize: 13, fontWeight: 600,
+                            boxShadow: '0 2px 8px rgba(107,78,255,0.3)'
+                        }}>
+                            Find #{highlightDevice.number} on the map
+                        </div>
+                    )}
+
                     <div
                         ref={wrapRef}
                         style={{
-                            overflow: zoom > 1 ? 'auto' : 'hidden',
-                            height: zoom > 1 ? (height || 400) : undefined,
+                            overflow: 'auto',
+                            maxHeight: height || 500,
                             borderRadius: '0.75rem',
                             WebkitOverflowScrolling: 'touch'
                         }}
                     >
-                        <div style={{ width: `${zoom * 100}%`, minHeight: 200, position: 'relative' }}>
+                        <div style={{ width: `${zoom * 100}%`, position: 'relative' }}>
                             <img
                                 src={mapImage}
                                 alt="Floor plan"
@@ -1403,6 +1409,7 @@
             const [floorData, setFloorData] = useState(floor);
             const [loading, setLoading] = useState(false);
             const [uploading, setUploading] = useState(false);
+            const [highlightDevice, setHighlightDevice] = useState(null);
             const fileInputRef = useRef(null);
 
             const isLocked = project.locked && !isVSEmployee(user.email);
@@ -1579,46 +1586,55 @@
                                 </div>
 
                                 {/* Map and Devices */}
-                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                    {/* Map */}
-                                    <div className="lg:col-span-2">
-                                        <FloorPlanMap
-                                            mapImage={floorData.pdfMapImage}
-                                            devices={floorData.devices || []}
-                                            onSelectDevice={(d) => canEdit && onSelectDevice(d)}
-                                        />
-                                    </div>
+                                {/* Map — full width on mobile, 2/3 on desktop */}
+                                <div className="mb-6">
+                                    <FloorPlanMap
+                                        mapImage={floorData.pdfMapImage}
+                                        devices={floorData.devices || []}
+                                        onSelectDevice={(d) => canEdit && onSelectDevice(d)}
+                                        highlightDevice={highlightDevice}
+                                    />
+                                    <p className="text-xs text-gray-400 mt-2 text-center">
+                                        Pinch to zoom • Device numbers are labeled on the floor plan
+                                    </p>
+                                </div>
 
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                                     {/* Device List */}
-                                    <div className="lg:col-span-1">
-                                        <div className="bg-white rounded-lg border border-gray-200 p-6 max-h-96 overflow-y-auto">
-                                            <h3 className="text-lg font-bold text-gray-900 mb-4">Devices</h3>
-                                            <div className="space-y-2">
+                                    <div className="lg:col-span-3">
+                                        <div className="bg-white rounded-lg border border-gray-200 p-6">
+                                            <h3 className="text-lg font-bold text-gray-900 mb-4">Devices ({deviceCount})</h3>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                                                 {floorData.devices?.map(device => (
                                                     <div
                                                         key={device.number}
-                                                        onClick={() => canEdit && onSelectDevice(device)}
-                                                        className={`p-3 rounded-lg border cursor-pointer transition ${
-                                                            device.complete
-                                                                ? 'bg-green-50 border-green-200'
-                                                                : 'bg-gray-50 border-gray-200 hover:border-purple-300'
+                                                        className={`p-3 rounded-lg border transition ${
+                                                            highlightDevice?.number === device.number
+                                                                ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-300'
+                                                                : device.complete
+                                                                    ? 'bg-green-50 border-green-200'
+                                                                    : 'bg-gray-50 border-gray-200'
                                                         }`}
                                                     >
-                                                        <div className="flex items-start justify-between">
-                                                            <div className="flex-1">
-                                                                <p className="font-semibold text-gray-900">
-                                                                    Device #{device.number}
+                                                        <div className="flex items-center justify-between">
+                                                            <div
+                                                                className="flex-1 cursor-pointer"
+                                                                onClick={() => {
+                                                                    if (canEdit) onSelectDevice(device);
+                                                                }}
+                                                            >
+                                                                <p className="font-semibold text-gray-900 text-sm">
+                                                                    #{device.number} {formatDeviceName(device) || ''}
                                                                 </p>
-                                                                {formatDeviceName(device) && (
-                                                                    <p className="text-xs text-gray-600">{formatDeviceName(device)}</p>
-                                                                )}
-                                                                <p className="text-xs text-gray-500 mt-1">
-                                                                    Type: {device.deviceType || '?'}
+                                                                <p className="text-xs text-gray-500">
+                                                                    {device.deviceType || '?'} {device.complete ? '• Done' : ''}
                                                                 </p>
                                                             </div>
-                                                            {device.complete && (
-                                                                <span className="text-green-600 font-bold">✓</span>
-                                                            )}
+                                                            <div className="flex items-center gap-1">
+                                                                {device.complete && (
+                                                                    <span className="text-green-600 font-bold text-sm">✓</span>
+                                                                )}
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 ))}
