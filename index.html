@@ -440,22 +440,8 @@
             const posCount = Object.keys(positions).length;
             console.log('[Pin Debug] Extracted', posCount, 'positions out of', devices.length, 'devices');
 
-            // FALLBACK: If fewer than 30% of positions detected, use grid
-            if (posCount < devices.length * 0.3 && devices.length > 0) {
-                console.log('[Pin Debug] Too few positions (' + posCount + ') — using grid fallback');
-                const cols = Math.ceil(Math.sqrt(devices.length));
-                const rows = Math.ceil(devices.length / cols);
-                devices.forEach((device, idx) => {
-                    if (!positions[device.number]) {
-                        const col = idx % cols;
-                        const row = Math.floor(idx / cols);
-                        positions[device.number] = {
-                            pinX: 10 + (col / Math.max(cols - 1, 1)) * 80,
-                            pinY: 10 + (row / Math.max(rows - 1, 1)) * 80
-                        };
-                    }
-                });
-            }
+            // No grid fallback — the floor plan image already has numbered device icons
+            // Pins will only show when real positions are extracted
 
             return positions;
         };
@@ -1250,23 +1236,10 @@
                 };
             }, []);
 
-            // Calculate pin positions (grid fallback if all at 0,0)
+            // Only show pins if real positions were extracted from the PDF
+            // (not grid fallback — the floor plan image already has numbered icons)
             const devs = devices || [];
-            const allZero = devs.length > 0 && devs.every(d => !d.pinX && !d.pinY);
-            const cols = Math.ceil(Math.sqrt(devs.length));
-            const rows = Math.ceil(devs.length / cols);
-
-            const getPos = (device, idx) => {
-                if (allZero) {
-                    const col = idx % cols;
-                    const row = Math.floor(idx / cols);
-                    return {
-                        x: 10 + (col / Math.max(cols - 1, 1)) * 80,
-                        y: 10 + (row / Math.max(rows - 1, 1)) * 80
-                    };
-                }
-                return { x: device.pinX || 50, y: device.pinY || 50 };
-            };
+            const hasRealPositions = devs.some(d => d.pinX > 0 && d.pinY > 0);
 
             return (
                 <div
@@ -1300,23 +1273,22 @@
                                 alt="Floor plan"
                                 className="map-image"
                             />
-                            {devs.map((device, idx) => {
-                                const pos = getPos(device, idx);
-                                return (
+                            {hasRealPositions && devs.map((device) => (
+                                device.pinX > 0 && device.pinY > 0 ? (
                                     <button
                                         key={device.number}
                                         onClick={(e) => { e.stopPropagation(); onSelectDevice(device); }}
                                         className={`device-pin ${device.complete ? 'completed' : ''}`}
                                         style={{
-                                            left: `${pos.x}%`,
-                                            top: `${pos.y}%`
+                                            left: `${device.pinX}%`,
+                                            top: `${device.pinY}%`
                                         }}
                                         title={`Device ${device.number}${formatDeviceName(device) ? ': ' + formatDeviceName(device) : ''}`}
                                     >
                                         {device.number}
                                     </button>
-                                );
-                            })}
+                                ) : null
+                            ))}
                         </div>
                     </div>
                 </div>
@@ -1328,67 +1300,88 @@
         // ============================================
 
         function ZoomedPreview({ mapImage, device, allDevices, onSelectDevice }) {
-            // Calculate position for this device (with grid fallback)
             const devs = allDevices || [];
-            const allZero = devs.length > 0 && devs.every(d => !d.pinX && !d.pinY);
-            const cols = Math.ceil(Math.sqrt(devs.length));
-            const rows = Math.ceil(devs.length / cols);
-            const idx = devs.findIndex(d => d.number === device.number);
+            const hasRealPos = device.pinX > 0 && device.pinY > 0;
+            const wrapRef = useRef(null);
+            const pinchRef = useRef(null);
+            const [zoom, setZoom] = useState(hasRealPos ? 3 : 1);
+            const zoomRef = useRef(hasRealPos ? 3 : 1);
 
-            const getPos = (d, i) => {
-                if (allZero) {
-                    const col = i % cols;
-                    const row = Math.floor(i / cols);
-                    return {
-                        x: 10 + (col / Math.max(cols - 1, 1)) * 80,
-                        y: 10 + (row / Math.max(rows - 1, 1)) * 80
-                    };
-                }
-                return { x: d.pinX || 50, y: d.pinY || 50 };
-            };
+            const clampZoom = (z) => Math.min(Math.max(z, 1), 6);
+            useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
-            const devPos = getPos(device, idx);
+            // Pinch-to-zoom
+            useEffect(() => {
+                const el = wrapRef.current;
+                if (!el) return;
+                const getDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+                const onTouchStart = (e) => {
+                    if (e.touches.length === 2) pinchRef.current = { startDist: getDist(e.touches), startZoom: zoomRef.current };
+                };
+                const onTouchMove = (e) => {
+                    if (!pinchRef.current || e.touches.length !== 2) return;
+                    e.preventDefault();
+                    setZoom(clampZoom(pinchRef.current.startZoom * (getDist(e.touches) / pinchRef.current.startDist)));
+                };
+                const onTouchEnd = () => { pinchRef.current = null; };
+                const onWheel = (e) => {
+                    if (!e.ctrlKey && !e.metaKey) return;
+                    e.preventDefault();
+                    setZoom(z => clampZoom(z * (1 - e.deltaY * 0.008)));
+                };
+                el.addEventListener('touchstart', onTouchStart, { passive: true });
+                el.addEventListener('touchmove', onTouchMove, { passive: false });
+                el.addEventListener('touchend', onTouchEnd);
+                el.addEventListener('wheel', onWheel, { passive: false });
+                return () => {
+                    el.removeEventListener('touchstart', onTouchStart);
+                    el.removeEventListener('touchmove', onTouchMove);
+                    el.removeEventListener('touchend', onTouchEnd);
+                    el.removeEventListener('wheel', onWheel);
+                };
+            }, []);
 
             return (
                 <div className="bg-white rounded-lg border border-gray-200 mb-6 overflow-hidden">
+                    {/* Zoom controls */}
+                    <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 20, display: 'flex', gap: 4 }}>
+                        <button
+                            onClick={() => setZoom(z => clampZoom(z * 1.5))}
+                            style={{ width: 24, height: 24, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
+                        >+</button>
+                        <button
+                            onClick={() => setZoom(z => clampZoom(z / 1.5))}
+                            style={{ width: 24, height: 24, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
+                        >−</button>
+                    </div>
                     <div
-                        className="relative bg-gray-50 overflow-hidden"
-                        style={{ height: 280 }}
+                        ref={wrapRef}
+                        className="relative bg-gray-50 overflow-auto select-none"
+                        style={{ height: 280, WebkitOverflowScrolling: 'touch' }}
                     >
                         <div style={{
                             position: 'relative',
-                            width: '100%',
-                            transform: 'scale(3)',
-                            transformOrigin: `${devPos.x}% ${devPos.y}%`
+                            width: `${zoom * 100}%`,
+                            transformOrigin: hasRealPos ? `${device.pinX}% ${device.pinY}%` : 'center center'
                         }}>
                             <img src={mapImage} alt="Floor plan" className="map-image" />
-                            {devs.map((d, i) => {
-                                const p = getPos(d, i);
+                            {/* Only show pin markers if real positions exist */}
+                            {hasRealPos && devs.map((d) => {
+                                if (!d.pinX || !d.pinY) return null;
                                 const isCurrent = d.number === device.number;
                                 return (
                                     <button
                                         key={d.number}
                                         onClick={() => onSelectDevice && onSelectDevice(d)}
+                                        className={`device-pin ${isCurrent ? 'completed' : ''}`}
                                         style={{
-                                            position: 'absolute',
-                                            left: `${p.x}%`,
-                                            top: `${p.y}%`,
-                                            transform: `translate(-50%, -50%) scale(0.333)`,
-                                            width: '24px',
-                                            height: '24px',
-                                            borderRadius: '50%',
+                                            left: `${d.pinX}%`,
+                                            top: `${d.pinY}%`,
                                             backgroundColor: isCurrent ? '#22c55e' : '#6B4EFF',
-                                            color: 'white',
-                                            fontWeight: '600',
-                                            fontSize: '9px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            border: isCurrent ? '3px solid #16a34a' : 'none',
+                                            border: isCurrent ? '2px solid #16a34a' : '1.5px solid rgba(255,255,255,0.9)',
                                             boxShadow: isCurrent
-                                                ? '0 0 0 4px rgba(34,197,94,0.3), 0 4px 12px rgba(0,0,0,0.2)'
-                                                : '0 2px 8px rgba(107,78,255,0.3)',
-                                            cursor: 'pointer',
+                                                ? '0 0 0 3px rgba(34,197,94,0.3), 0 3px 8px rgba(0,0,0,0.2)'
+                                                : '0 1px 4px rgba(107,78,255,0.3)',
                                             zIndex: isCurrent ? 10 : 5
                                         }}
                                     >
@@ -1406,7 +1399,7 @@
         // FLOOR SCREEN
         // ============================================
 
-        function FloorScreen({ project, floor, user, onBack, onSelectDevice }) {
+        function FloorScreen({ project, floor, user, onBack, onSelectDevice, onFloorDataUpdate }) {
             const [floorData, setFloorData] = useState(floor);
             const [loading, setLoading] = useState(false);
             const [uploading, setUploading] = useState(false);
@@ -1504,12 +1497,15 @@
                         status: project.status === 'not_started' ? 'in_progress' : project.status
                     });
 
-                    setFloorData({
+                    const updatedFloor = {
                         ...floorData,
                         pdfMapImage: mapImage,
                         devices: deviceObjects,
                         pdfUrl: pdfUrl
-                    });
+                    };
+                    setFloorData(updatedFloor);
+                    // Notify parent so DeviceScreen gets fresh floor data
+                    if (onFloorDataUpdate) onFloorDataUpdate(updatedFloor);
 
                     alert('PDF uploaded and processed successfully!');
                 } catch (err) {
@@ -2338,6 +2334,7 @@
                         floor={currentFloor}
                         user={user}
                         onBack={() => setScreen('project')}
+                        onFloorDataUpdate={(updatedFloor) => setCurrentFloor(updatedFloor)}
                         onSelectDevice={(device) => {
                             setCurrentDevice(device);
                             setScreen('device');
