@@ -141,6 +141,18 @@
             { name: "Other (enter below)", email: "" }
         ];
 
+        // Check if a parsed device name looks like a valid device ID (e.g. "30B-UA3", "H00-123", "AA:BB:CC:DD:EE:FF")
+        const isValidDeviceName = (name) => {
+            if (!name || name.length < 3) return false;
+            // Must contain at least one letter and one digit or colon/dash
+            return /[a-zA-Z]/.test(name) && /[\d:.-]/.test(name);
+        };
+
+        const formatDeviceName = (device) => {
+            if (isValidDeviceName(device.name)) return device.name;
+            return '';
+        };
+
         const generateTechCode = () => {
             const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let code = '';
@@ -148,10 +160,56 @@
             return code;
         };
 
+        // Detect the header/table boundaries on page 1
+        const detectPdfBounds = async (page) => {
+            const textContent = await page.getTextContent();
+            const viewport = page.getViewport({ scale: 1 });
+
+            let tableStartPdfY = null; // PDF Y of table header ("Name")
+            let headerEndPdfY = null;  // PDF Y of where header info ends / map begins
+
+            // Find table start by looking for "Name" column header
+            const headerKeywords = ['Name', 'Status', 'Firmware'];
+            for (const item of textContent.items) {
+                const text = item.str.trim();
+                if (text === 'Name' && !tableStartPdfY) {
+                    tableStartPdfY = item.transform[5];
+                }
+            }
+
+            // Find where the header ends by looking for info text near the top
+            // (project name, address, "Detected Devices", etc.)
+            // These are typically large font items in the top portion of the page
+            const topItems = textContent.items.filter(item => {
+                const pdfY = item.transform[5];
+                const canvasY = viewport.height - pdfY;
+                const pctFromTop = canvasY / viewport.height;
+                return pctFromTop < 0.25; // top 25% of page
+            });
+
+            if (topItems.length > 0) {
+                // The lowest item in the header area marks where the map starts
+                let lowestHeaderY = viewport.height; // start at top (highest PDF Y)
+                topItems.forEach(item => {
+                    if (item.transform[5] < lowestHeaderY) {
+                        lowestHeaderY = item.transform[5];
+                    }
+                });
+                headerEndPdfY = lowestHeaderY - 5; // small margin below header
+            }
+
+            return {
+                tableStartPdfY: tableStartPdfY || viewport.height * 0.35,
+                headerEndPdfY: headerEndPdfY || viewport.height * 0.85,
+                viewport: viewport,
+                textContent: textContent
+            };
+        };
+
         const extractMapImage = async (pdfData) => {
             const pdf = await pdfjsLib.getDocument(pdfData).promise;
             const page = await pdf.getPage(1);
-            const scale = 3;
+            const scale = 2;
             const viewport = page.getViewport({ scale });
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
@@ -163,26 +221,24 @@
                 viewport: viewport
             }).promise;
 
-            // Try to detect where the table starts by finding the "Name" header text
-            const textContent = await page.getTextContent();
-            let tableStartY = canvas.height * 0.65; // fallback
-            for (const item of textContent.items) {
-                if (item.str.trim() === 'Name') {
-                    // The table header row - convert PDF Y to canvas Y (PDF origin is bottom-left)
-                    const rawViewport = page.getViewport({ scale: 1 });
-                    const pdfY = item.transform[5];
-                    const canvasY = (rawViewport.height - pdfY) * scale;
-                    tableStartY = Math.max(canvasY - 30 * scale, canvas.height * 0.3); // small margin above "Name"
-                    break;
-                }
-            }
+            const bounds = await detectPdfBounds(page);
+            const rawViewport = bounds.viewport;
 
-            const mapHeight = Math.floor(tableStartY);
+            // Convert PDF Y coordinates to canvas Y (top-origin)
+            // Map area: from headerEnd to tableStart in PDF coords
+            // In canvas: from (viewport.height - headerEndPdfY) to (viewport.height - tableStartPdfY)
+            const cropTop = Math.floor((rawViewport.height - bounds.headerEndPdfY) * scale);
+            const cropBottom = Math.floor((rawViewport.height - bounds.tableStartPdfY) * scale) + 20 * scale;
+
+            const mapTop = Math.max(0, cropTop);
+            const mapBottom = Math.min(canvas.height, cropBottom);
+            const mapHeight = mapBottom - mapTop;
+
             const mapCanvas = document.createElement('canvas');
             mapCanvas.width = canvas.width;
             mapCanvas.height = mapHeight;
             const mapCtx = mapCanvas.getContext('2d');
-            mapCtx.drawImage(canvas, 0, 0, canvas.width, mapHeight, 0, 0, mapCanvas.width, mapCanvas.height);
+            mapCtx.drawImage(canvas, 0, mapTop, canvas.width, mapHeight, 0, 0, mapCanvas.width, mapCanvas.height);
 
             return mapCanvas.toDataURL('image/png');
         };
@@ -238,40 +294,42 @@
                 }
                 if (currentRow.length > 0) rows.push(currentRow);
 
+                // Status/state/firmware/battery keywords for field detection
+                const STATUS_WORDS = ['Online', 'Offline'];
+                const STATE_WORDS = ['Operational', 'Error', 'Warning', 'Inactive'];
+                const BATTERY_WORDS = ['Wired', 'Healthy', 'Low'];
+                const isKnownField = (text) => STATUS_WORDS.includes(text) || STATE_WORDS.includes(text) ||
+                    BATTERY_WORDS.includes(text) || /^\d+\.\d+\.\d+/.test(text);
+
                 // Parse rows into device records
                 for (const row of rows) {
-                    // Skip header rows
                     if (row.includes('Name') || row.includes('Status') || row.includes('Firmware Version')) continue;
 
-                    // Look for a row that starts with a number
                     const firstItem = row[0];
                     if (/^\d{1,3}$/.test(firstItem)) {
                         const num = parseInt(firstItem);
                         if (num > 0 && num <= 999 && !deviceNumbers.has(num)) {
                             deviceNumbers.add(num);
-                            const device = {
-                                number: num,
-                                name: '',
-                                status: '',
-                                state: '',
-                                firmware: '',
-                                battery: ''
-                            };
-                            // Parse remaining items in the row
+                            const device = { number: num, name: '', status: '', state: '', firmware: '', battery: '' };
+
+                            // Join all text items before the first known field keyword as the device name
+                            let nameFragments = [];
+                            let pastName = false;
                             for (let i = 1; i < row.length; i++) {
                                 const text = row[i];
-                                if (!device.name && (text.includes('-') || text.includes(':') || /^[A-Z0-9]{3}/.test(text))) {
-                                    device.name = text;
-                                } else if (!device.status && (text === 'Online' || text === 'Offline')) {
-                                    device.status = text;
-                                } else if (!device.state && (text === 'Operational' || text === 'Error' || text === 'Warning' || text === 'Inactive')) {
-                                    device.state = text;
-                                } else if (!device.firmware && /^\d+\.\d+\.\d+/.test(text)) {
-                                    device.firmware = text;
-                                } else if (!device.battery && (text === 'Wired' || text === 'Healthy' || text === 'Low')) {
-                                    device.battery = text;
+                                if (!pastName && isKnownField(text)) {
+                                    pastName = true;
+                                }
+                                if (!pastName) {
+                                    nameFragments.push(text);
+                                } else {
+                                    if (!device.status && STATUS_WORDS.includes(text)) device.status = text;
+                                    else if (!device.state && STATE_WORDS.includes(text)) device.state = text;
+                                    else if (!device.firmware && /^\d+\.\d+\.\d+/.test(text)) device.firmware = text;
+                                    else if (!device.battery && BATTERY_WORDS.includes(text)) device.battery = text;
                                 }
                             }
+                            device.name = nameFragments.join('') || '';
                             devices.push(device);
                         }
                     }
@@ -284,53 +342,60 @@
         const extractDevicePositions = async (pdfData, devices) => {
             const pdf = await pdfjsLib.getDocument(pdfData).promise;
             const page = await pdf.getPage(1);
-            const textContent = await page.getTextContent();
-            const viewport = page.getViewport({ scale: 1 });
+            const bounds = await detectPdfBounds(page);
+            const viewport = bounds.viewport;
+            const textContent = bounds.textContent;
 
-            // Determine where the table starts (same logic as extractMapImage)
-            let tableStartPdfY = viewport.height * 0.35; // fallback (PDF coords, from bottom)
-            for (const item of textContent.items) {
-                if (item.str.trim() === 'Name') {
-                    tableStartPdfY = item.transform[5] + 10; // slightly above the Name header
-                    break;
-                }
-            }
-            const mapHeightPdf = viewport.height - tableStartPdfY; // height of map area in PDF units (from top)
-            // Actually: the map occupies from top of page to tableStartPdfY
-            // In PDF coords (origin bottom-left): map goes from tableStartPdfY to viewport.height
-            // In canvas coords (origin top-left): map goes from 0 to (viewport.height - tableStartPdfY)
-            const mapCanvasHeight = viewport.height - tableStartPdfY;
+            // The cropped map goes from headerEndPdfY down to tableStartPdfY (in PDF coords)
+            // In canvas coords (top-origin): from (viewport.height - headerEndPdfY) to (viewport.height - tableStartPdfY)
+            const mapTopCanvas = viewport.height - bounds.headerEndPdfY;
+            const mapBottomCanvas = viewport.height - bounds.tableStartPdfY;
+            const mapHeight = mapBottomCanvas - mapTopCanvas;
 
             const positions = {};
-            const numberItems = [];
             const deviceNums = new Set(devices.map(d => d.number));
 
-            // Collect all small number text items from the map area (above the table)
+            // Collect number text items that are in the floor plan area (between header and table)
+            // Filter by: must be in the map area, must have small font size (pin labels, not header text)
             textContent.items.forEach(item => {
                 const text = item.str.trim();
-                if (/^\d{1,3}$/.test(text)) {
-                    const num = parseInt(text);
-                    if (deviceNums.has(num) && item.transform[5] > tableStartPdfY) {
-                        // This number is in the map area (PDF Y > tableStartPdfY means above the table)
-                        numberItems.push({
-                            number: num,
-                            x: item.transform[4],
-                            y: item.transform[5]
-                        });
-                    }
-                }
-            });
+                if (!/^\d{1,3}$/.test(text)) return;
+                const num = parseInt(text);
+                if (!deviceNums.has(num)) return;
 
-            // Convert PDF coordinates to percentage positions relative to the cropped map
-            numberItems.forEach(item => {
-                const pinX = (item.x / viewport.width) * 100;
-                // Convert PDF Y to canvas Y within the cropped map
-                const canvasY = viewport.height - item.y; // distance from top of full page
-                const pinY = (canvasY / mapCanvasHeight) * 100;
-                positions[item.number] = {
-                    pinX: Math.max(1, Math.min(99, pinX)),
-                    pinY: Math.max(1, Math.min(99, pinY))
-                };
+                const pdfY = item.transform[5];
+                const fontSize = Math.abs(item.transform[3]) || Math.abs(item.transform[0]);
+
+                // Must be between header and table (in the floor plan area)
+                if (pdfY >= bounds.headerEndPdfY || pdfY <= bounds.tableStartPdfY) return;
+
+                // Filter out large text (header numbers like "89 Detected Devices")
+                // Pin labels on floor plans are typically small (font size < 12)
+                if (fontSize > 14) return;
+
+                // Check if this number is near other words (header text) - pin numbers are isolated
+                const nearbyText = textContent.items.some(other => {
+                    if (other === item) return false;
+                    const otherText = other.str.trim();
+                    if (!otherText || /^\d{1,3}$/.test(otherText)) return false;
+                    const dx = Math.abs(other.transform[4] - item.transform[4]);
+                    const dy = Math.abs(other.transform[5] - item.transform[5]);
+                    return dx < 30 && dy < 5 && /[a-zA-Z]{3,}/.test(otherText);
+                });
+                if (nearbyText) return;
+
+                // Convert to percentage within the cropped map
+                const canvasY = viewport.height - pdfY;
+                const pinX = (item.transform[4] / viewport.width) * 100;
+                const pinY = ((canvasY - mapTopCanvas) / mapHeight) * 100;
+
+                // Only add if within reasonable bounds (and prefer the first match for each device)
+                if (pinX > 0 && pinX < 100 && pinY > 0 && pinY < 100 && !positions[num]) {
+                    positions[num] = {
+                        pinX: Math.max(1, Math.min(99, pinX)),
+                        pinY: Math.max(1, Math.min(99, pinY))
+                    };
+                }
             });
 
             return positions;
@@ -872,7 +937,7 @@
         // PROJECT DETAIL SCREEN
         // ============================================
 
-        function ProjectDetailScreen({ project, user, onSelectFloor, onBack, onUnlock, onSummary, onSignOut, isTechMode }) {
+        function ProjectDetailScreen({ project, user, onSelectFloor, onBack, onUnlock, onSummary, onSignOut, isTechMode, onDeleteProject, onDeleteFloor }) {
             const [floors, setFloors] = useState([]);
             const [loading, setLoading] = useState(true);
 
@@ -1016,10 +1081,23 @@
 
                                                 {canEdit && (
                                                     <button
-                                                        onClick={() => onSelectFloor(floor)}
+                                                        onClick={(e) => { e.stopPropagation(); onSelectFloor(floor); }}
                                                         className="w-full custom-purple-bg text-white py-2 px-4 rounded font-semibold hover:opacity-90 mt-4"
                                                     >
                                                         {deviceCount === 0 ? 'Upload Floor Overview' : 'View Floor'}
+                                                    </button>
+                                                )}
+                                                {isVSEmployee(user.email) && onDeleteFloor && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (confirm(`Delete ${floor.floorName}? This cannot be undone.`)) {
+                                                                onDeleteFloor(floor);
+                                                            }
+                                                        }}
+                                                        className="w-full text-red-500 hover:text-red-700 text-sm font-semibold mt-2"
+                                                    >
+                                                        Delete Floor
                                                     </button>
                                                 )}
                                             </div>
@@ -1030,13 +1108,26 @@
                         </div>
 
                         {/* Summary and Submit */}
-                        <div className="mt-12">
+                        <div className="mt-12 flex items-center gap-4 flex-wrap">
                             <button
                                 onClick={onSummary}
                                 className="custom-purple-bg text-white py-3 px-8 rounded-lg font-semibold hover:opacity-90"
                             >
                                 {project.status === 'submitted' ? 'View Summary' : 'Review & Submit'}
                             </button>
+
+                            {isVSEmployee(user.email) && onDeleteProject && (
+                                <button
+                                    onClick={() => {
+                                        if (confirm(`Delete project "${project.projectName}"? This will delete all floors and data. This cannot be undone.`)) {
+                                            onDeleteProject(project);
+                                        }
+                                    }}
+                                    className="text-red-500 hover:text-red-700 font-semibold py-3 px-4"
+                                >
+                                    Delete Project
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -1245,7 +1336,7 @@
                                                                 top: `${device.pinY}%`
                                                             }}
                                                             onClick={() => canEdit && onSelectDevice(device)}
-                                                            title={`Device ${device.number}: ${device.name}`}
+                                                            title={`Device ${device.number}${formatDeviceName(device) ? ': ' + formatDeviceName(device) : ''}`}
                                                         >
                                                             {device.number}
                                                         </div>
@@ -1275,7 +1366,9 @@
                                                                 <p className="font-semibold text-gray-900">
                                                                     Device #{device.number}
                                                                 </p>
-                                                                <p className="text-xs text-gray-600">{device.name}</p>
+                                                                {formatDeviceName(device) && (
+                                                                    <p className="text-xs text-gray-600">{formatDeviceName(device)}</p>
+                                                                )}
                                                                 <p className="text-xs text-gray-500 mt-1">
                                                                     Type: {device.deviceType || '?'}
                                                                 </p>
@@ -1415,7 +1508,9 @@
                                 ← Back to Floor
                             </button>
                             <h1 className="text-3xl font-bold">Device #{deviceData.number}</h1>
-                            <p className="text-purple-100 mt-1">{deviceData.name}</p>
+                            {formatDeviceName(deviceData) && (
+                                <p className="text-purple-100 mt-1">{formatDeviceName(deviceData)}</p>
+                            )}
                         </div>
                     </div>
 
@@ -1423,6 +1518,54 @@
                         {isLocked && (
                             <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
                                 <p className="text-blue-800 font-semibold">Read Only</p>
+                            </div>
+                        )}
+
+                        {/* Zoomed Map View */}
+                        {floor.pdfMapImage && deviceData.pinX > 0 && deviceData.pinY > 0 && (
+                            <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 overflow-hidden">
+                                <div style={{
+                                    position: 'relative',
+                                    width: '100%',
+                                    height: '200px',
+                                    overflow: 'hidden',
+                                    borderRadius: '8px',
+                                    backgroundColor: '#f9fafb'
+                                }}>
+                                    <img
+                                        src={floor.pdfMapImage}
+                                        alt="Floor plan"
+                                        style={{
+                                            position: 'absolute',
+                                            width: '300%',
+                                            height: 'auto',
+                                            left: `${50 - deviceData.pinX * 3}%`,
+                                            top: `${50 - deviceData.pinY * 2}%`,
+                                            transformOrigin: 'center center'
+                                        }}
+                                    />
+                                    {/* Pin marker for this device */}
+                                    <div style={{
+                                        position: 'absolute',
+                                        left: '50%',
+                                        top: '50%',
+                                        transform: 'translate(-50%, -50%)',
+                                        width: '40px',
+                                        height: '40px',
+                                        backgroundColor: '#22c55e',
+                                        borderRadius: '50%',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        color: 'white',
+                                        fontWeight: 'bold',
+                                        fontSize: '14px',
+                                        boxShadow: '0 0 0 4px rgba(34, 197, 94, 0.3), 0 4px 12px rgba(0,0,0,0.2)',
+                                        zIndex: 10
+                                    }}>
+                                        {deviceData.number}
+                                    </div>
+                                </div>
                             </div>
                         )}
 
@@ -1935,6 +2078,39 @@
                         }}
                         onSignOut={handleSignOut}
                         isTechMode={isTechMode}
+                        onDeleteProject={async (proj) => {
+                            try {
+                                // Delete all floors subcollection first
+                                const floorsSnap = await db.collection('installAudits').doc(proj.id).collection('floors').get();
+                                const batch = db.batch();
+                                floorsSnap.docs.forEach(doc => batch.delete(doc.ref));
+                                batch.delete(db.collection('installAudits').doc(proj.id));
+                                await batch.commit();
+                                setCurrentProject(null);
+                                setScreen('list');
+                            } catch (err) {
+                                console.error('Error deleting project:', err);
+                                alert('Failed to delete project: ' + err.message);
+                            }
+                        }}
+                        onDeleteFloor={async (floorToDelete) => {
+                            try {
+                                await db.collection('installAudits').doc(currentProject.id)
+                                    .collection('floors').doc(floorToDelete.id).delete();
+                                // Update project device count
+                                const remainingFloors = await db.collection('installAudits')
+                                    .doc(currentProject.id).collection('floors').get();
+                                let total = 0;
+                                remainingFloors.forEach(f => { total += (f.data().devices?.length || 0); });
+                                await db.collection('installAudits').doc(currentProject.id).update({
+                                    totalDevices: total,
+                                    numFloors: remainingFloors.size
+                                });
+                            } catch (err) {
+                                console.error('Error deleting floor:', err);
+                                alert('Failed to delete floor: ' + err.message);
+                            }
+                        }}
                     />
                 );
             }
