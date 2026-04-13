@@ -175,49 +175,71 @@
             return { canvas, page, pdf };
         };
 
-        // Find the Y position where the device table starts (look for "Name" text)
+        // Find the Y position where the device table starts
         const findTableTopY = async (page, scale) => {
             const textContent = await page.getTextContent();
             const viewport = page.getViewport({ scale: 1 });
-            for (const item of textContent.items) {
-                if (item.str.trim() === 'Name') {
-                    // Convert PDF coords (bottom-origin) to canvas coords (top-origin)
-                    return Math.floor((viewport.height - item.transform[5]) * scale);
+
+            // Collect all text items with their positions
+            const items = textContent.items.map(item => ({
+                text: item.str.trim(),
+                pdfY: item.transform[5],
+                canvasY: Math.floor((viewport.height - item.transform[5]) * scale)
+            }));
+
+            // Look for table header keywords: "Name", "Status", "Firmware Version"
+            // The table header row has these together. Find the lowest one on the page
+            // (highest canvasY = further down the page)
+            const tableKeywords = ['Status', 'Firmware Version', 'Firmware', 'Battery'];
+            let bestCanvasY = null;
+
+            for (const item of items) {
+                if (item.text === 'Name') {
+                    // Check if there are other table header keywords near the same Y
+                    const nearbyHeaders = items.filter(other =>
+                        tableKeywords.includes(other.text) &&
+                        Math.abs(other.pdfY - (viewport.height - item.canvasY / scale)) < 5
+                    );
+                    // If "Name" appears with other table headers, this is the device table
+                    if (nearbyHeaders.length >= 1) {
+                        const y = item.canvasY;
+                        if (bestCanvasY === null || y > bestCanvasY) bestCanvasY = y;
+                    }
                 }
             }
-            // Fallback: table starts at ~65% down the page
+
+            // If found, add a small offset above the header text
+            if (bestCanvasY !== null) {
+                console.log('[Crop] Found device table at canvasY:', bestCanvasY, 'of', viewport.height * scale);
+                return Math.max(0, bestCanvasY - 10);
+            }
+
+            // Fallback: look for ANY "Name" text in the lower half of the page
+            for (const item of items) {
+                if (item.text === 'Name' && item.canvasY > viewport.height * scale * 0.4) {
+                    console.log('[Crop] Fallback: found "Name" at canvasY:', item.canvasY);
+                    return Math.max(0, item.canvasY - 10);
+                }
+            }
+
+            // Last resort: table starts at ~65% down the page
+            console.log('[Crop] No table header found, using 65% fallback');
             return Math.floor(viewport.height * scale * 0.65);
         };
 
-        // Extract map image: render page, crop above the table
+        // Extract map image: render full page 1, crop everything above the device table
         const extractMapImage = async (pdfData) => {
             const { canvas, page } = await renderPdfToCanvas(pdfData, 2);
             const tableTopY = await findTableTopY(page, 2);
 
-            // Also scan from top to find where actual content starts (skip pure white)
-            const ctx = canvas.getContext('2d');
-            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-            let contentStartY = 0;
-            for (let y = 0; y < Math.min(tableTopY, canvas.height); y++) {
-                let nonWhiteCount = 0;
-                for (let x = 0; x < canvas.width; x += 4) {
-                    const idx = (y * canvas.width + x) * 4;
-                    const r = imgData[idx], g = imgData[idx+1], b = imgData[idx+2];
-                    // Count non-white, non-near-white pixels
-                    if (r < 240 || g < 240 || b < 240) nonWhiteCount++;
-                }
-                // If we find a row with significant content, start here
-                if (nonWhiteCount > canvas.width * 0.01) {
-                    contentStartY = Math.max(0, y - 5);
-                    break;
-                }
-            }
+            console.log('[Crop] Canvas size:', canvas.width, 'x', canvas.height, 'tableTopY:', tableTopY);
 
-            const mapTop = contentStartY;
-            const mapBottom = Math.min(canvas.height, tableTopY);
-            const mapHeight = mapBottom - mapTop;
+            // Crop from top of page down to just above the device table
+            const mapHeight = Math.min(canvas.height, tableTopY);
 
-            if (mapHeight <= 50) {
+            if (mapHeight <= 100) {
+                // Something went wrong with table detection — use full page
+                console.log('[Crop] Table detection failed, using full page');
                 return canvas.toDataURL('image/jpeg', 0.85);
             }
 
@@ -225,7 +247,7 @@
             mapCanvas.width = canvas.width;
             mapCanvas.height = mapHeight;
             mapCanvas.getContext('2d').drawImage(
-                canvas, 0, mapTop, canvas.width, mapHeight,
+                canvas, 0, 0, canvas.width, mapHeight,
                 0, 0, mapCanvas.width, mapCanvas.height
             );
             return mapCanvas.toDataURL('image/jpeg', 0.85);
@@ -469,36 +491,19 @@
             return positions;
         };
 
-        // Legacy wrapper for the upload handler
+        // Detect device positions by scanning the rendered PDF for colored markers
         const extractDevicePositions = async (pdfData, devices) => {
             const { canvas, page } = await renderPdfToCanvas(pdfData, 2);
             const tableTopY = await findTableTopY(page, 2);
-
-            // Also find content start Y for the cropped map
-            const ctx = canvas.getContext('2d');
-            const imgData = ctx.getImageData(0, 0, canvas.width, Math.min(tableTopY, canvas.height)).data;
-            let contentStartY = 0;
-            for (let y = 0; y < Math.min(tableTopY, canvas.height); y++) {
-                let nonWhite = 0;
-                for (let x = 0; x < canvas.width; x += 4) {
-                    const idx = (y * canvas.width + x) * 4;
-                    if (imgData[idx] < 240 || imgData[idx+1] < 240 || imgData[idx+2] < 240) nonWhite++;
-                }
-                if (nonWhite > canvas.width * 0.01) { contentStartY = Math.max(0, y - 5); break; }
-            }
+            const mapHeight = Math.min(tableTopY, canvas.height);
 
             const clusters = detectDevicePositionsFromCanvas(canvas, tableTopY, devices.length);
 
-            // Adjust cluster positions to be relative to the CROPPED map image
-            const mapTop = contentStartY;
-            const mapHeight = Math.min(tableTopY, canvas.height) - mapTop;
-            const adjustedClusters = clusters.map(c => ({
-                x: c.x,
-                y: c.y - mapTop,
-                size: c.size
-            })).filter(c => c.y > 0 && c.y < mapHeight);
+            // Cluster positions are already in canvas coords starting from top
+            // The map image is cropped from y=0 to y=mapHeight, so positions map directly
+            const validClusters = clusters.filter(c => c.y > 0 && c.y < mapHeight);
 
-            return matchClustersToDevices(adjustedClusters, devices, canvas.width, mapHeight);
+            return matchClustersToDevices(validClusters, devices, canvas.width, mapHeight);
         };
 
         const autoDetectDeviceType = (device, devices, floorDevices) => {
