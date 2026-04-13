@@ -227,28 +227,53 @@
             return Math.floor(viewport.height * scale * 0.65);
         };
 
-        // Extract map image: render full page 1, crop everything above the device table
+        // Extract map image: render page 1, crop from just below header to just above device table
         const extractMapImage = async (pdfData) => {
             const { canvas, page } = await renderPdfToCanvas(pdfData, 2);
             const tableTopY = await findTableTopY(page, 2);
+            const w = canvas.width, h = canvas.height;
 
-            console.log('[Crop] Canvas size:', canvas.width, 'x', canvas.height, 'tableTopY:', tableTopY);
+            // Find where the header text ends by looking at text items on the page
+            // The header is at the very top (floor name, building info, device count)
+            // The floor plan drawing starts below it
+            const textContent = await page.getTextContent();
+            const viewport = page.getViewport({ scale: 1 });
+            const textItems = textContent.items.map(item => ({
+                text: item.str.trim(),
+                canvasY: Math.floor((viewport.height - item.transform[5]) * 2) // scale=2
+            })).filter(item => item.text.length > 0);
 
-            // Crop from top of page down to just above the device table
-            const mapHeight = Math.min(canvas.height, tableTopY);
+            // Find the lowest header text item that's in the top portion of the page
+            // Header items are typically in the top 15% of the page
+            const headerZone = h * 0.15;
+            let headerBottomY = 0;
+            for (const item of textItems) {
+                if (item.canvasY < headerZone && item.canvasY > headerBottomY) {
+                    headerBottomY = item.canvasY;
+                }
+            }
+
+            // Start the map crop just below the header text (add padding)
+            // If no header text found, start from very top
+            const mapTop = headerBottomY > 0 ? Math.min(headerBottomY + 30, tableTopY) : 0;
+            const mapBottom = Math.min(h, tableTopY);
+            const mapHeight = mapBottom - mapTop;
+
+            console.log('[Crop] headerBottom:', headerBottomY, 'mapTop:', mapTop, 'tableTopY:', tableTopY, 'mapHeight:', mapHeight, 'canvasH:', h);
 
             if (mapHeight <= 100) {
-                // Something went wrong with table detection — use full page
-                console.log('[Crop] Table detection failed, using full page');
-                return canvas.toDataURL('image/jpeg', 0.85);
+                // Fallback: just use everything above the table
+                const mc = document.createElement('canvas');
+                mc.width = w; mc.height = Math.max(tableTopY, Math.floor(h * 0.6));
+                mc.getContext('2d').drawImage(canvas, 0, 0, w, mc.height, 0, 0, w, mc.height);
+                return mc.toDataURL('image/jpeg', 0.85);
             }
 
             const mapCanvas = document.createElement('canvas');
-            mapCanvas.width = canvas.width;
+            mapCanvas.width = w;
             mapCanvas.height = mapHeight;
             mapCanvas.getContext('2d').drawImage(
-                canvas, 0, 0, canvas.width, mapHeight,
-                0, 0, mapCanvas.width, mapCanvas.height
+                canvas, 0, mapTop, w, mapHeight, 0, 0, w, mapHeight
             );
             return mapCanvas.toDataURL('image/jpeg', 0.85);
         };
@@ -1304,39 +1329,27 @@
                     className="select-none border-2 border-gray-200 transition-colors"
                     style={{ position: 'relative', borderRadius: '0.75rem' }}
                 >
-                    {/* Zoom controls */}
-                    <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 20, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <button
-                            onClick={() => setZoom(z => clampZoom(z * 1.5))}
-                            style={{ width: 28, height: 28, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
-                        >+</button>
-                        <button
-                            onClick={() => setZoom(z => clampZoom(z / 1.5))}
-                            style={{ width: 28, height: 28, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
-                        >−</button>
-                    </div>
-
-                    {/* Highlighted device indicator */}
-                    {highlightDevice && (
-                        <div style={{
-                            position: 'absolute', top: 8, left: 8, zIndex: 20,
-                            background: '#6B4EFF', color: 'white', borderRadius: 8,
-                            padding: '4px 12px', fontSize: 13, fontWeight: 600,
-                            boxShadow: '0 2px 8px rgba(107,78,255,0.3)'
-                        }}>
-                            Find #{highlightDevice.number} on the map
-                        </div>
-                    )}
-
                     <div
                         ref={wrapRef}
                         style={{
                             overflow: 'auto',
-                            maxHeight: height || 500,
+                            maxHeight: height || 600,
                             borderRadius: '0.75rem',
-                            WebkitOverflowScrolling: 'touch'
+                            WebkitOverflowScrolling: 'touch',
+                            position: 'relative'
                         }}
                     >
+                        {/* Zoom controls — inside the scroll container so they scroll with content */}
+                        <div style={{ position: 'sticky', top: 8, float: 'right', marginRight: 8, zIndex: 20, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <button
+                                onClick={() => setZoom(z => clampZoom(z * 1.5))}
+                                style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.9)', border: '1px solid #ddd', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.15)' }}
+                            >+</button>
+                            <button
+                                onClick={() => setZoom(z => clampZoom(z / 1.5))}
+                                style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.9)', border: '1px solid #ddd', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.15)' }}
+                            >−</button>
+                        </div>
                         <div style={{ width: `${zoom * 100}%`, position: 'relative' }}>
                             <img
                                 src={mapImage}
@@ -1412,30 +1425,28 @@
             }, []);
 
             return (
-                <div className="bg-white rounded-lg border border-gray-200 mb-6 overflow-hidden">
-                    {/* Zoom controls */}
-                    <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 20, display: 'flex', gap: 4 }}>
-                        <button
-                            onClick={() => setZoom(z => clampZoom(z * 1.5))}
-                            style={{ width: 24, height: 24, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
-                        >+</button>
-                        <button
-                            onClick={() => setZoom(z => clampZoom(z / 1.5))}
-                            style={{ width: 24, height: 24, borderRadius: '50%', background: 'white', border: '1px solid #ccc', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}
-                        >−</button>
-                    </div>
+                <div className="bg-white rounded-lg border border-gray-200 mb-6 overflow-hidden" style={{ position: 'relative' }}>
                     <div
                         ref={wrapRef}
                         className="relative bg-gray-50 overflow-auto select-none"
-                        style={{ height: 280, WebkitOverflowScrolling: 'touch' }}
+                        style={{ height: 320, WebkitOverflowScrolling: 'touch' }}
                     >
+                        {/* Zoom controls */}
+                        <div style={{ position: 'sticky', top: 8, float: 'right', marginRight: 8, zIndex: 20, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <button
+                                onClick={() => setZoom(z => clampZoom(z * 1.5))}
+                                style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(255,255,255,0.9)', border: '1px solid #ddd', fontSize: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.15)' }}
+                            >+</button>
+                            <button
+                                onClick={() => setZoom(z => clampZoom(z / 1.5))}
+                                style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(255,255,255,0.9)', border: '1px solid #ddd', fontSize: 16, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.15)' }}
+                            >−</button>
+                        </div>
                         <div style={{
                             position: 'relative',
-                            width: `${zoom * 100}%`,
-                            transformOrigin: hasRealPos ? `${device.pinX}% ${device.pinY}%` : 'center center'
+                            width: `${zoom * 100}%`
                         }}>
                             <img src={mapImage} alt="Floor plan" className="map-image" />
-                            {/* Only show pin markers if real positions exist */}
                             {hasRealPos && devs.map((d) => {
                                 if (!d.pinX || !d.pinY) return null;
                                 const isCurrent = d.number === device.number;
@@ -1844,21 +1855,26 @@
                             </div>
                         )}
 
-                        {/* Zoomed Map View */}
+                        {/* Floor Plan Map — find this device's number on the map */}
                         {floor.pdfMapImage && (
-                            <ZoomedPreview
-                                mapImage={floor.pdfMapImage}
-                                device={deviceData}
-                                allDevices={floor.devices || []}
-                                onSelectDevice={(d) => {
-                                    if (d.number !== deviceData.number) {
-                                        setDeviceData(d);
-                                        setPhotoPreview(d.photo || '');
-                                        setPhotoFile(null);
-                                        setErrors({});
-                                    }
-                                }}
-                            />
+                            <>
+                                <p className="text-sm text-gray-500 mb-2 font-medium">
+                                    Find device <span className="font-bold text-gray-900">#{deviceData.number}</span> on the floor plan below:
+                                </p>
+                                <ZoomedPreview
+                                    mapImage={floor.pdfMapImage}
+                                    device={deviceData}
+                                    allDevices={floor.devices || []}
+                                    onSelectDevice={(d) => {
+                                        if (d.number !== deviceData.number) {
+                                            setDeviceData(d);
+                                            setPhotoPreview(d.photo || '');
+                                            setPhotoFile(null);
+                                            setErrors({});
+                                        }
+                                    }}
+                                />
+                            </>
                         )}
 
                         <div className="bg-white rounded-lg border border-gray-200 p-8">
